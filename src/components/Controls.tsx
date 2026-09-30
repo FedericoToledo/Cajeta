@@ -104,7 +104,7 @@ export default function Controls({
 
       <h3>Desplazar STL{multiItem ? " seleccionado" : ""} (mm)</h3>
       {OFF_AXES.map((ax) => (
-        <NumField key={ax} label={ax.toUpperCase()} value={offset[ax]} min={-400} max={400} step={1}
+        <NumField key={ax} label={ax.toUpperCase()} value={offset[ax]} min={-800} max={800} step={1}
           onChange={(v) => onOffset({ ...offset, [ax]: v })} />
       ))}
       <button className="axis" onClick={() => onOffset({ x: 0, y: 0, z: 0 })}>Centrar</button>
