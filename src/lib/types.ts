@@ -12,6 +12,9 @@ export const LAYER = {
 /** Tipo de caja. */
 export type BoxType = "tray-lid" | "chest";
 
+/** Modo con múltiples STL: todo en una caja con un insert, o una caja por STL dentro de una contenedora. */
+export type BoxMode = "single-insert" | "individual-boxes";
+
 export type LayerName = (typeof LAYER)[keyof typeof LAYER];
 
 /** Parámetros globales de material y ajustes. */

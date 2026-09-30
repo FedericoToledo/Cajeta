@@ -122,5 +122,101 @@ check("SVG con color de corte", svg.includes("#e11d48"));
 check("SVG con punto de pegado rojo", svg.includes("#ff0000"));
 console.log(`DXF ${dxf.length} bytes · SVG ${svg.length} bytes`);
 
+// --- Diseño / grabado láser: caras + imagen embebida ---
+import { faceRects, designToSVG, defaultPlacement } from "../src/lib/design.ts";
+import { assembleBox } from "../src/lib/assemble.ts";
+const dFaces = faceRects(params);
+check("diseño: 9 caras (tapa 5 + bandeja 4)", dFaces.length === 9, `(${dFaces.length})`);
+check("diseño: incluye tapa:top, excluye bandeja:top",
+  dFaces.some((f) => f.id === "tapa:top") && !dFaces.some((f) => f.id === "bandeja:top"));
+const boxModel = assembleBox(params);
+const be = makerjs.measure.modelExtents(boxModel)!;
+check("diseño: todas las caras dentro del dieline",
+  dFaces.every((f) => f.x >= be.low[0]-0.01 && f.x+f.w <= be.high[0]+0.01 && f.y >= be.low[1]-0.01 && f.y+f.h <= be.high[1]+0.01));
+const dImg = { id: "i1", name: "logo.png", dataUrl: "data:image/png;base64,iVBORw0KGgoAAA==" };
+const dSvg = designToSVG(params, [defaultPlacement("i1", "tapa:top")], { i1: dImg }, boxModel, {});
+check("diseño: SVG embebe <image> debajo de las líneas",
+  dSvg.includes("<image") && dSvg.includes("data:image/png;base64") && dSvg.indexOf("<image") < dSvg.indexOf("<path"));
+check("diseño: sin placements no hay <image>", !designToSVG(params, [], {}, boxModel, {}).includes("<image"));
+
+// --- Diseño en COFRE: caras dentro del dieline (L>=W y W>L) ---
+function facesInsideChest(prm: typeof params, tag: string) {
+  const m = assembleBox(prm);
+  const ex = makerjs.measure.modelExtents(m)!;
+  const fr = faceRects(prm);
+  const ids = fr.map((f) => f.id).sort().join(",");
+  check(`cofre ${tag}: 6 caras (4 base + cubierta + labio)`, fr.length === 6, `(${fr.length})`);
+  check(`cofre ${tag}: incluye tapa:top y tapa:front`,
+    ids.includes("tapa:top") && ids.includes("tapa:front"));
+  check(`cofre ${tag}: todas las caras dentro del dieline`,
+    fr.every((f) => f.x >= ex.low[0]-0.01 && f.x+f.w <= ex.high[0]+0.01 && f.y >= ex.low[1]-0.01 && f.y+f.h <= ex.high[1]+0.01));
+}
+facesInsideChest({ ...params, boxType: "chest" }, "L>=W");
+// W>L: producto con x<y fuerza el caso transpuesto.
+facesInsideChest({ ...params, boxType: "chest", product: { ...pz, x: pz.y, y: pz.x } }, "W>L");
+
+// --- Múltiples STL: empaquetado + ensambles ---
+import { pack } from "../src/lib/pack.ts";
+import { rectProduct } from "../src/lib/product.ts";
+import {
+  packProducts, packBoxes, assembleMultiBox, assembleMultiInsert,
+  assembleContainer, assembleAllBoxes, assembleBoxWithInsert,
+} from "../src/lib/assemble.ts";
+
+// pack: no solape y respeta gap.
+const psz = [{ w: 40, h: 30 }, { w: 20, h: 60 }, { w: 50, h: 25 }, { w: 15, h: 15 }];
+const pk = pack(psz, 5);
+// Dos rectángulos no se solapan si están separados en X o en Y por >= (w1+w2)/2 + gap.
+let packOk = true;
+for (let i = 0; i < psz.length; i++) for (let j = i + 1; j < psz.length; j++) {
+  const A = pk.pos[i], B = pk.pos[j];
+  const sepX = Math.abs(A.x - B.x) >= (psz[i].w + psz[j].w) / 2 + 5 - 1e-6;
+  const sepY = Math.abs(A.y - B.y) >= (psz[i].h + psz[j].h) / 2 + 5 - 1e-6;
+  if (!(sepX || sepY)) packOk = false;
+}
+check("pack: no hay solapamiento (respeta gap)", packOk, `(W=${pk.W.toFixed(0)}×H=${pk.H.toFixed(0)})`);
+
+// Tres productos distintos.
+const prods = [
+  pz,
+  analyze(boxVertices(40, 60, 20), { up: "z", rotateDeg: 0, flip: false }, 3),
+  rectProduct(30, 30, 15),
+];
+const mp = packProducts(params, prods);
+check("packProducts: 3 posiciones + producto combinado", mp.pos.length === 3 && mp.product.x === mp.W);
+
+// Caja combinada encierra el bounding del empaquetado (interior ≥ pack).
+const mBox = assembleMultiBox(params, prods);
+const mbe = makerjs.measure.modelExtents(mBox)!;
+check("multiBox: la caja combinada encierra el empaquetado",
+  (mbe.high[0] - mbe.low[0]) >= mp.W && (mbe.high[1] - mbe.low[1]) >= mp.H);
+
+// Insert multi con repisas: sliceCount × productos ventanas + responde a "pisos".
+const mIns = assembleMultiInsert(params, prods);
+const insModels = (mIns as any).models.insert.models;
+const nRep = Object.keys(insModels).filter((k) => k.startsWith("repisa")).length;
+check("multiInsert: repisas × productos (sliceCount=3, 3 prod)", nRep === 9, `(${nRep})`);
+const mInsMore = assembleMultiInsert({ ...params, sliceCount: 5 }, prods);
+const nRep5 = Object.keys((mInsMore as any).models.insert.models).filter((k) => k.startsWith("repisa")).length;
+check("multiInsert: aumentar pisos agrega repisas", nRep5 > nRep, `(${nRep5} > ${nRep})`);
+check("multiInsert DXF con CORTE+PLIEGUE (acordeón)", toDXF(mIns).includes("CORTE") && toDXF(mIns).includes("PLIEGUE"));
+
+// Cajas individuales + contenedora, cada caja con su insert.
+const cont = assembleContainer(params, prods);
+const allBoxes = assembleAllBoxes(params, prods);
+const boxKeys = Object.keys((allBoxes as any).models);
+check("individual: contenedora es una caja válida", toDXF(cont).includes("PLIEGUE"));
+check("individual: 3 cajas con insert (bandeja+tapa+insert c/u)", boxKeys.length === 9, `(${boxKeys.length})`);
+const bwi = assembleBoxWithInsert(params, prods[0]);
+check("boxWithInsert: bandeja+tapa+insert", Object.keys((bwi as any).models).length === 3);
+// Dielines no se superponen: piezas consecutivas separadas al menos GAP en X.
+const bwiModels = (bwi as any).models;
+const exts = Object.values(bwiModels).map((m: any) => makerjs.measure.modelExtents(m)).sort((a: any, b: any) => a.low[0] - b.low[0]);
+let noOverlap = true;
+for (let i = 1; i < exts.length; i++) if ((exts[i] as any).low[0] < (exts[i - 1] as any).high[0] - 1e-6) noOverlap = false;
+check("layout: piezas no se superponen en X", noOverlap);
+const pkb = packBoxes(params, prods);
+check("packBoxes: contenedora ≥ que caja combinada (por paredes)", pkb.W >= mp.W && pkb.H >= mp.H);
+
 console.log(failures === 0 ? "\nOK ✔" : `\nFALLARON ${failures} ✖`);
 process.exit(failures === 0 ? 0 : 1);

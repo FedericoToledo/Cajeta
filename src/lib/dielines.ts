@@ -280,6 +280,60 @@ export function buildSuspensionInsert(p: Params): makerjs.IModel {
 }
 
 /**
+ * Insert de suspensión MULTI-PRODUCTO (Modo A): una bandeja de altura completa + un
+ * ACORDEÓN de repisas (cantidad = sliceCount) que cuelga del borde del fondo. En CADA
+ * repisa va UNA ventana por producto, con el contorno de su sección a esa altura, en
+ * su posición del empaquetado. Así cada producto queda suspendido y sigue su forma, y
+ * aumentar "pisos/repisas" agrega capas. `positions` son centros relativos al bounding
+ * del empaquetado (esquina en 0,0); se desplazan `clearance` para centrarlos.
+ */
+export function buildMultiInsert(
+  p: Params, products: { footprint: Pt[]; slices: Pt[][]; x: number; y: number }[],
+  positions: { x: number; y: number }[]
+): makerjs.IModel {
+  const { L, W, H } = innerDims(p);
+  const N = Math.max(1, Math.floor(p.sliceCount));
+  const spacing = N > 1 ? Math.max(4, p.product.z / N) : 0;
+  const depthY = W;
+
+  const tray = trayDieline(L, W, H, { cornerTab: p.cornerTab, thickness: p.thickness, backCrease: true });
+  const fr = Math.min(20, L * 0.15, W * 0.15);
+  const floorOpening = rectLines(fr, fr, L - 2 * fr, W - 2 * fr, LAYER.CUT);
+
+  const paths: Record<string, makerjs.IPath> = {};
+  const models: Record<string, makerjs.IModel> = { bandeja: tray };
+  let ai = 0;
+  const add = (pt: makerjs.IPath) => (paths[`a${ai++}`] = pt);
+
+  let y = W + H; // borde del fondo (bisagra a la primera repisa)
+  for (let k = 0; k < N; k++) {
+    const y0 = y, y1 = y + depthY;
+    add(line([0, y0], [0, y1], LAYER.CUT));
+    add(line([L, y0], [L, y1], LAYER.CUT));
+    // Una ventana por producto en esta repisa (sección k de cada producto).
+    products.forEach((pr, i) => {
+      const pos = positions[i] ?? { x: 0, y: 0 };
+      const cx = pos.x + p.clearance;
+      const cy = y0 + pos.y + p.clearance;
+      const sec = pr.slices[Math.min(pr.slices.length - 1, N - 1 - k)] ?? pr.footprint;
+      models[`repisa${k}_${i}`] = buildWindow({ ...p, product: { ...p.product, x: pr.x, y: pr.y } }, sec, cx, cy);
+    });
+    y = y1;
+    if (k < N - 1 && spacing > 0) {
+      add(line([0, y], [L, y], LAYER.CREASE)); // repisa -> montante
+      add(line([0, y], [0, y + spacing], LAYER.CUT));
+      add(line([L, y], [L, y + spacing], LAYER.CUT));
+      y += spacing;
+      add(line([0, y], [L, y], LAYER.CREASE)); // montante -> repisa
+    }
+  }
+  add(line([0, y], [L, y], LAYER.CUT)); // borde libre de la última repisa
+  models.acordeon = { paths };
+  models.aberturaFondo = floorOpening;
+  return { models };
+}
+
+/**
  * Ventana de agarre para una sección `contour` (centrada en 0,0), ubicada
  * con su centro en (cx, cy):
  *  - useContour: polígono del contorno con offset de agarre.

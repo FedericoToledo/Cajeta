@@ -1,20 +1,26 @@
-// Visor 3D del STL con three.js: centra el modelo, muestra el bounding box
-// y permite orbitar. Recibe el ArrayBuffer del STL.
+// Visor 3D de uno o varios STL con three.js: centra cada modelo, muestra su
+// bounding box y los acomoda en sus posiciones de empaquetado (sin superponerse).
 import { useEffect, useRef } from "react";
 import * as THREE from "three";
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { Orientation } from "../lib/product";
 
-interface Props {
-  buffer: ArrayBuffer | null;
+export interface ViewItem {
+  id: string;
+  buffer: ArrayBuffer;
   orientation?: Orientation;
 }
 
+interface Props {
+  items: ViewItem[];
+  positions?: { x: number; y: number; z?: number }[]; // centro (plano XY) + z vertical, centrado en origen
+}
+
 /** Rotación del mesh que replica EXACTAMENTE analyze (flip → eje vertical → giro) y lleva Z↑ a Y↑. */
-function applyOrientation(mesh: THREE.Mesh, o?: Orientation) {
-  mesh.rotation.set(0, 0, 0);
-  if (!o) return;
+function orientationQuat(o?: Orientation): THREE.Quaternion {
+  const q = new THREE.Quaternion();
+  if (!o) return q;
   const flip = new THREE.Matrix4();
   if (o.flip) o.up === "x" ? flip.makeRotationY(Math.PI) : flip.makeRotationX(Math.PI);
   const orient = new THREE.Matrix4();
@@ -22,13 +28,12 @@ function applyOrientation(mesh: THREE.Mesh, o?: Orientation) {
   else if (o.up === "x") orient.makeRotationY(-Math.PI / 2);
   const planar = new THREE.Matrix4().makeRotationZ((o.rotateDeg * Math.PI) / 180);
   const zy = new THREE.Matrix4().makeRotationX(-Math.PI / 2);
-  mesh.quaternion.setFromRotationMatrix(zy.multiply(planar).multiply(orient).multiply(flip));
+  return q.setFromRotationMatrix(zy.multiply(planar).multiply(orient).multiply(flip));
 }
 
-export default function Viewer3D({ buffer, orientation }: Props) {
+export default function Viewer3D({ items, positions }: Props) {
   const mountRef = useRef<HTMLDivElement>(null);
-  const meshRef = useRef<THREE.Mesh | null>(null);
-  const boxRef = useRef<THREE.Box3Helper | null>(null);
+  const groupRef = useRef<THREE.Group | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
 
   // Inicializa la escena una sola vez.
@@ -38,13 +43,8 @@ export default function Viewer3D({ buffer, orientation }: Props) {
     scene.background = new THREE.Color(0x0f172a);
     sceneRef.current = scene;
 
-    const camera = new THREE.PerspectiveCamera(
-      45,
-      mount.clientWidth / mount.clientHeight,
-      0.1,
-      10000
-    );
-    camera.position.set(120, 120, 120);
+    const camera = new THREE.PerspectiveCamera(45, mount.clientWidth / mount.clientHeight, 0.1, 10000);
+    camera.position.set(160, 160, 160);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(mount.clientWidth, mount.clientHeight);
@@ -58,15 +58,10 @@ export default function Viewer3D({ buffer, orientation }: Props) {
     const dir = new THREE.DirectionalLight(0xffffff, 0.9);
     dir.position.set(1, 1, 1);
     scene.add(dir);
-    const grid = new THREE.GridHelper(400, 40, 0x334155, 0x1e293b);
-    scene.add(grid);
+    scene.add(new THREE.GridHelper(400, 40, 0x334155, 0x1e293b));
 
     let raf = 0;
-    const animate = () => {
-      raf = requestAnimationFrame(animate);
-      controls.update();
-      renderer.render(scene, camera);
-    };
+    const animate = () => { raf = requestAnimationFrame(animate); controls.update(); renderer.render(scene, camera); };
     animate();
 
     const onResize = () => {
@@ -85,46 +80,36 @@ export default function Viewer3D({ buffer, orientation }: Props) {
     };
   }, []);
 
-  // Carga el STL cuando cambia el buffer.
+  // (Re)construye los meshes cuando cambian los items, orientaciones o posiciones.
+  const sig = JSON.stringify(
+    items.map((it, i) => [it.id, it.orientation?.up, it.orientation?.rotateDeg, it.orientation?.flip, positions?.[i]?.x, positions?.[i]?.y, positions?.[i]?.z])
+  );
   useEffect(() => {
     const scene = sceneRef.current;
-    if (!scene || !buffer) return;
-
-    if (meshRef.current) {
-      scene.remove(meshRef.current);
-      meshRef.current.geometry.dispose();
+    if (!scene) return;
+    if (groupRef.current) {
+      scene.remove(groupRef.current);
+      groupRef.current.traverse((o) => { if ((o as THREE.Mesh).geometry) (o as THREE.Mesh).geometry.dispose(); });
     }
-    if (boxRef.current) scene.remove(boxRef.current);
-
-    const loader = new STLLoader();
-    // STLLoader.parse acepta ArrayBuffer o string.
-    const geometry = loader.parse(buffer);
-    geometry.computeBoundingBox();
-    geometry.center(); // centra en el origen para orbitar cómodo
-
-    const material = new THREE.MeshStandardMaterial({
-      color: 0x38bdf8,
-      metalness: 0.1,
-      roughness: 0.6,
+    const group = new THREE.Group();
+    items.forEach((it, i) => {
+      const geometry = new STLLoader().parse(it.buffer);
+      geometry.computeBoundingBox();
+      geometry.center();
+      const mesh = new THREE.Mesh(
+        geometry,
+        new THREE.MeshStandardMaterial({ color: 0x38bdf8, metalness: 0.1, roughness: 0.6 })
+      );
+      mesh.add(new THREE.Box3Helper(geometry.boundingBox!.clone(), new THREE.Color(0xf59e0b)));
+      mesh.quaternion.copy(orientationQuat(it.orientation));
+      const p = positions?.[i];
+      if (p) mesh.position.set(p.x, p.z ?? 0, p.y);
+      group.add(mesh);
     });
-    const mesh = new THREE.Mesh(geometry, material);
-    // Bounding box como hijo del mesh (rota junto con él).
-    const helper = new THREE.Box3Helper(
-      geometry.boundingBox!.clone(),
-      new THREE.Color(0xf59e0b)
-    );
-    mesh.add(helper);
-    applyOrientation(mesh, orientation);
-    scene.add(mesh);
-    meshRef.current = mesh;
-    boxRef.current = helper;
+    scene.add(group);
+    groupRef.current = group;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [buffer]);
-
-  // Reaplica la orientación cuando cambia (sin recargar la geometría).
-  useEffect(() => {
-    if (meshRef.current) applyOrientation(meshRef.current, orientation);
-  }, [orientation?.up, orientation?.rotateDeg, orientation?.flip]);
+  }, [sig]);
 
   return <div ref={mountRef} className="viewer3d" />;
 }

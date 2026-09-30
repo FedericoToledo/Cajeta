@@ -2,123 +2,209 @@ import { useMemo, useState } from "react";
 import Viewer3D from "./components/Viewer3D";
 import FoldSim from "./components/FoldSim";
 import Controls from "./components/Controls";
+import DesignView from "./components/DesignView";
+import ErrorBoundary from "./components/ErrorBoundary";
+import { DesignImage, Placement } from "./lib/design";
 import { parseSTL, ParsedSTL } from "./lib/stl";
 import { analyze, Orientation } from "./lib/product";
 import { bestOrientation } from "./lib/optimize";
-import { Params, defaultParams } from "./lib/types";
-import { assembleBox, assembleInsert } from "./lib/assemble";
+import { Params, BoxMode, defaultParams } from "./lib/types";
+import {
+  assembleBox, assembleInsert, assembleMultiBox, assembleMultiInsert,
+  assembleContainer, assembleBoxWithInsert, packProducts, packBoxes,
+} from "./lib/assemble";
 import { toDXF, toSVG, download, printableHTML } from "./lib/exporters";
+import makerjs from "makerjs";
+
+interface Offset { x: number; y: number; z: number }
+interface StlItem {
+  id: string;
+  name: string;
+  buffer: ArrayBuffer;
+  stl: ParsedSTL;
+  orientation: Orientation;
+  offset: Offset; // desplazamiento manual (mm) para aprovechar mejor la caja
+}
+
+const defaultOrientation = (): Orientation => ({ up: "z", rotateDeg: 0, flip: false });
 
 export default function App() {
-  const [buffer, setBuffer] = useState<ArrayBuffer | null>(null);
-  const [stl, setStl] = useState<ParsedSTL | null>(null);
-  const [params, setParams] = useState<Params | null>(null);
+  const [items, setItems] = useState<StlItem[]>([]);
+  const [boxParams, setBoxParams] = useState<Params | null>(null);
+  const [mode, setMode] = useState<BoxMode>("single-insert");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [view, setView] = useState<"product" | "fold">("product");
+  const [view, setView] = useState<"product" | "fold" | "design">("product");
+  const [images, setImages] = useState<DesignImage[]>([]);
+  const [placements, setPlacements] = useState<Placement[]>([]);
 
-  const onFile = async (file: File) => {
+  const onFiles = async (files: FileList) => {
     setError(null);
-    try {
-      const buf = await file.arrayBuffer();
-      const parsed = parseSTL(buf);
-      const orientation: Orientation = { up: "z", rotateDeg: 0, flip: false };
-      const product = analyze(parsed.vertices, orientation, 3);
-      setBuffer(buf);
-      setStl(parsed);
-      setParams(defaultParams(product, orientation));
-    } catch (e) {
-      setError((e as Error).message);
+    const added: StlItem[] = [];
+    for (const file of Array.from(files)) {
+      if (!file.name.toLowerCase().endsWith(".stl")) continue;
+      try {
+        const buf = await file.arrayBuffer();
+        const stl = parseSTL(buf);
+        added.push({ id: `stl-${Math.random().toString(36).slice(2, 8)}`, name: file.name, buffer: buf, stl, orientation: defaultOrientation(), offset: { x: 0, y: 0, z: 0 } });
+      } catch (e) { setError((e as Error).message); }
     }
+    if (!added.length) return;
+    if (!boxParams) {
+      const p0 = analyze(added[0].stl.vertices, added[0].orientation, 3);
+      setBoxParams(defaultParams(p0, added[0].orientation));
+    }
+    setItems((prev) => [...prev, ...added]);
+    setSelectedId(added[added.length - 1].id);
   };
 
-  // Recalcula el producto (bbox + huella + secciones) sólo cuando cambia la
-  // orientación o la cantidad de secciones.
-  const product = useMemo(() => {
-    if (!stl || !params) return null;
-    return analyze(stl.vertices, params.orientation, params.sliceCount);
-  }, [stl, params?.orientation.up, params?.orientation.rotateDeg, params?.sliceCount]);
+  const removeItem = (id: string) => {
+    setItems((prev) => prev.filter((it) => it.id !== id));
+    if (selectedId === id) setSelectedId(null);
+  };
 
-  // Parámetros efectivos: los editables + el producto reanalizado.
-  const eff = useMemo(
-    () => (params && product ? { ...params, product } : null),
-    [params, product]
+  const setItemOrientation = (id: string, o: Orientation) =>
+    setItems((prev) => prev.map((it) => (it.id === id ? { ...it, orientation: o } : it)));
+
+  const setItemOffset = (id: string, off: Offset) =>
+    setItems((prev) => prev.map((it) => (it.id === id ? { ...it, offset: off } : it)));
+
+  // Productos reanalizados (dependen de cada orientación + secciones globales).
+  const sliceCount = boxParams?.sliceCount ?? 3;
+  const products = useMemo(
+    () => items.map((it) => analyze(it.stl.vertices, it.orientation, sliceCount)),
+    [items, sliceCount]
   );
 
-  // Previews separados (líneas gruesas + responsive, sólo visualización).
-  const svgBox = useMemo(() => {
-    if (!eff) return null;
-    try { return toSVG(assembleBox(eff), { stroke: "1.2", responsive: true }); }
-    catch (e) { setError((e as Error).message); return null; }
-  }, [eff]);
-  const svgInsert = useMemo(() => {
-    if (!eff) return null;
-    try { return toSVG(assembleInsert(eff), { stroke: "1.2", responsive: true }); }
-    catch (e) { setError((e as Error).message); return null; }
-  }, [eff]);
+  const single = products.length === 1;
+  const effMode: BoxMode = single ? "single-insert" : mode;
+  const selIdx = items.findIndex((it) => it.id === selectedId);
+  const selItem = selIdx >= 0 ? items[selIdx] : items[0];
+  const selProduct = selIdx >= 0 ? products[selIdx] : products[0];
 
   const autoOrient = () => {
-    if (!stl || !params) return;
-    const { orientation } = bestOrientation(stl.vertices, params.sliceCount);
-    setParams({ ...params, orientation: { ...orientation, flip: params.orientation.flip } });
+    if (!selItem || !boxParams) return;
+    const { orientation } = bestOrientation(selItem.stl.vertices, boxParams.sliceCount);
+    setItemOrientation(selItem.id, { ...orientation, flip: selItem.orientation.flip });
   };
 
-  const exportDXFBox = () => {
-    if (eff) download("cajeta_caja.dxf", toDXF(assembleBox(eff)), "application/dxf");
-  };
-  const exportDXFInsert = () => {
-    if (eff) download("cajeta_insert.dxf", toDXF(assembleInsert(eff)), "application/dxf");
-  };
+  // Empaquetado activo (según modo) → posiciones centradas para el 3D.
+  const packInfo = useMemo(() => {
+    if (!boxParams || !products.length) return null;
+    return effMode === "individual-boxes" ? packBoxes(boxParams, products) : packProducts(boxParams, products);
+  }, [boxParams, products, effMode]);
+  // Posiciones centradas = empaquetado automático + desplazamiento manual (x,y); z = alto.
+  const positions = useMemo(
+    () =>
+      packInfo
+        ? packInfo.pos.map((p, i) => {
+            const off = items[i]?.offset ?? { x: 0, y: 0, z: 0 };
+            return { x: p.x - packInfo.W / 2 + off.x, y: p.y - packInfo.H / 2 + off.y, z: off.z };
+          })
+        : [],
+    [packInfo, items]
+  );
+  const posCenteredXY = useMemo(() => positions.map((p) => ({ x: p.x, y: p.y })), [positions]);
 
-  // Abre una ventana A4 imprimible (guardar como PDF para pruebas en papel).
+  // Producto sintético para caja/decoración (combinado en A, contenedora en B).
+  const designParams = useMemo<Params | null>(() => {
+    if (!boxParams || !products.length || !selItem) return null;
+    const product = effMode === "individual-boxes"
+      ? packBoxes(boxParams, products).product
+      : single ? products[0] : packProducts(boxParams, products).product;
+    return { ...boxParams, product, orientation: selItem.orientation };
+  }, [boxParams, products, effMode, single, selItem]);
+
+  // Entregables 2D (cada uno descargable por separado como DXF/PDF).
+  interface Deliverable { id: string; title: string; model: makerjs.IModel; svg: string }
+  const deliverables = useMemo<Deliverable[]>(() => {
+    if (!boxParams || !products.length) return [];
+    const make = (id: string, title: string, model: makerjs.IModel): Deliverable => ({
+      id, title, model, svg: toSVG(model, { stroke: "1.2", responsive: true }),
+    });
+    try {
+      if (effMode === "individual-boxes") {
+        const out = [make("contenedora", "Contenedora", assembleContainer(boxParams, products))];
+        products.forEach((pr, i) => {
+          const name = items[i]?.name ? ` — ${items[i].name}` : "";
+          out.push(make(`caja${i}`, `Caja ${i + 1}${name} (con insert)`, assembleBoxWithInsert(boxParams, pr)));
+        });
+        return out;
+      }
+      return [
+        make("caja", single ? "Caja" : "Caja combinada",
+          single ? assembleBox({ ...boxParams, product: products[0] }) : assembleMultiBox(boxParams, products)),
+        make("insert", "Insert",
+          single ? assembleInsert({ ...boxParams, product: products[0] }) : assembleMultiInsert(boxParams, products, posCenteredXY)),
+      ];
+    } catch (e) { setError((e as Error).message); return []; }
+  }, [boxParams, products, effMode, single, posCenteredXY, items]);
+
   const openPrint = (html: string) => {
     const w = window.open("", "_blank");
     if (!w) return;
-    w.document.write(html);
-    w.document.close();
-    w.focus();
+    w.document.write(html); w.document.close(); w.focus();
     setTimeout(() => w.print(), 400);
   };
-  const exportPDFBox = () => {
-    if (eff) openPrint(printableHTML(assembleBox(eff), "Cajeta — Caja"));
+  const exportDXF = (model: makerjs.IModel | null, name: string) => {
+    if (model) download(`cajeta_${name}.dxf`, toDXF(model), "application/dxf");
   };
-  const exportPDFInsert = () => {
-    if (eff) openPrint(printableHTML(assembleInsert(eff), "Cajeta — Insert"));
+  const exportPDF = (model: makerjs.IModel | null, title: string) => {
+    if (model) openPrint(printableHTML(model, `Cajeta — ${title}`));
   };
+
+  const hasItems = items.length > 0 && !!boxParams;
 
   return (
     <div className="app">
       <header>
         <h1>Cajeta</h1>
-        <p>STL → caja de cartón + insert de suspensión → DXF separados (caja / insert) para router CNC</p>
+        <p>1 · Organizá los productos → 2 · Plegado y cortes (DXF/PDF) → 3 · Diseño para láser</p>
       </header>
 
       <div className="layout">
         <aside className="panel">
           <label className="upload">
             <input
-              type="file"
-              accept=".stl"
-              onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])}
+              type="file" accept=".stl" multiple
+              onChange={(e) => e.target.files && e.target.files.length && onFiles(e.target.files)}
             />
-            <span>Subir STL del producto</span>
+            <span>{items.length ? "+ Agregar STL" : "Subir STL del producto"}</span>
           </label>
 
           {error && <p className="error">⚠ {error}</p>}
 
-          {stl && eff && (
-            <p className="meta">
-              Triángulos: {stl.triangles.toLocaleString()} · Producto orientado{" "}
-              {eff.product.x.toFixed(1)} × {eff.product.y.toFixed(1)} ×{" "}
-              {eff.product.z.toFixed(1)} mm
-            </p>
+          {items.length > 0 && (
+            <div className="item-list">
+              {items.map((it, i) => (
+                <div
+                  key={it.id}
+                  className={`item-row${it.id === selectedId ? " on" : ""}`}
+                  onClick={() => setSelectedId(it.id)}
+                >
+                  <span className="item-name" title={it.name}>{it.name}</span>
+                  <span className="item-dims">
+                    {products[i] && `${products[i].x.toFixed(0)}×${products[i].y.toFixed(0)}×${products[i].z.toFixed(0)}`}
+                  </span>
+                  <button className="axis" onClick={(e) => { e.stopPropagation(); removeItem(it.id); }} title="Quitar">✕</button>
+                </div>
+              ))}
+            </div>
           )}
 
-          {params && eff && (
+          {hasItems && boxParams && selItem && selProduct && (
             <Controls
-              params={params}
-              product={eff.product}
-              onChange={setParams}
+              params={boxParams}
+              product={selProduct}
+              onChange={setBoxParams}
+              orientation={selItem.orientation}
+              onOrientation={(o) => setItemOrientation(selItem.id, o)}
               onAutoOrient={autoOrient}
+              offset={selItem.offset}
+              onOffset={(o) => setItemOffset(selItem.id, o)}
+              mode={mode}
+              onMode={setMode}
+              multiItem={items.length > 1}
             />
           )}
 
@@ -130,61 +216,71 @@ export default function App() {
         </aside>
 
         <main className="stage">
-          <section className="stage-3d">
-            <div className="tabs">
-              <button
-                className={view === "product" ? "tab on" : "tab"}
-                onClick={() => setView("product")}
-              >
-                Producto 3D
-              </button>
-              <button
-                className={view === "fold" ? "tab on" : "tab"}
-                onClick={() => setView("fold")}
-              >
-                Plegado 3D
-              </button>
-            </div>
-            {!buffer ? (
-              <div className="empty">Subí un STL para empezar</div>
+          <div className="tabs">
+            <button className={view === "product" ? "tab on" : "tab"} onClick={() => setView("product")}>1 · Organizar productos 3D</button>
+            <button className={view === "fold" ? "tab on" : "tab"} onClick={() => setView("fold")}>2 · Plegado y cortes 3D</button>
+            <button className={view === "design" ? "tab on" : "tab"} onClick={() => setView("design")}>3 · Diseño</button>
+          </div>
+
+          <ErrorBoundary label="la vista">
+            {!hasItems ? (
+              <div className="empty">Subí uno o más STL para empezar</div>
             ) : view === "product" ? (
-              <Viewer3D buffer={buffer} orientation={params?.orientation} />
-            ) : (
-              eff && (
-                <FoldSim buffer={buffer} orientation={params?.orientation} params={eff} />
-              )
-            )}
-          </section>
-          <section className="stage-2d">
-            <div className="dieline-head">
-              <h2>Dieline — Caja</h2>
-              {eff && (
-                <div className="dl-actions">
-                  <button onClick={exportDXFBox}>⬇ DXF</button>
-                  <button onClick={exportPDFBox} className="secondary">⬇ PDF A4</button>
+              <div className="pane-3d">
+                <Viewer3D
+                  items={items.map((it) => ({ id: it.id, buffer: it.buffer, orientation: it.orientation }))}
+                  positions={positions}
+                />
+                <p className="stage-hint">Acomodá los productos (orientación y desplazamiento). Los cortes se generan en el paso 2.</p>
+              </div>
+            ) : view === "fold" ? (
+              <div className="fold-and-cuts">
+                <div className="pane-3d">
+                  {designParams && (
+                    <FoldSim
+                      params={designParams}
+                      mode={effMode}
+                      items={items.map((it) => ({ id: it.id, buffer: it.buffer, orientation: it.orientation }))}
+                      products={products}
+                      positions={positions}
+                      placements={placements}
+                      images={images}
+                    />
+                  )}
                 </div>
-              )}
-            </div>
-            {svgBox ? (
-              <div className="svg-wrap" dangerouslySetInnerHTML={{ __html: svgBox }} />
+                <section className="stage-2d">
+                  {deliverables.length === 0 ? (
+                    <div className="empty">Los cortes aparecerán acá</div>
+                  ) : (
+                    deliverables.map((d) => (
+                      <div key={d.id} className="deliverable">
+                        <div className="dieline-head">
+                          <h2>{d.title}</h2>
+                          <div className="dl-actions">
+                            <button onClick={() => exportDXF(d.model, d.id)}>⬇ DXF</button>
+                            <button onClick={() => exportPDF(d.model, d.title)} className="secondary">⬇ PDF A4</button>
+                          </div>
+                        </div>
+                        <div className="svg-wrap" dangerouslySetInnerHTML={{ __html: d.svg }} />
+                      </div>
+                    ))
+                  )}
+                </section>
+              </div>
             ) : (
-              <div className="empty">El dieline de la caja aparecerá acá</div>
+              <div className="pane-design">
+                {designParams && (
+                  <DesignView
+                    p={designParams}
+                    images={images}
+                    placements={placements}
+                    onImages={setImages}
+                    onPlacements={setPlacements}
+                  />
+                )}
+              </div>
             )}
-            <div className="dieline-head">
-              <h2>Dieline — Insert</h2>
-              {eff && (
-                <div className="dl-actions">
-                  <button onClick={exportDXFInsert}>⬇ DXF</button>
-                  <button onClick={exportPDFInsert} className="secondary">⬇ PDF A4</button>
-                </div>
-              )}
-            </div>
-            {svgInsert ? (
-              <div className="svg-wrap" dangerouslySetInnerHTML={{ __html: svgInsert }} />
-            ) : (
-              <div className="empty">El dieline del insert aparecerá acá</div>
-            )}
-          </section>
+          </ErrorBoundary>
         </main>
       </div>
     </div>

@@ -118,3 +118,14 @@ export function analyze(
 function centered(poly: Pt[], cx: number, cy: number): Pt[] {
   return translate(poly, -cx, -cy);
 }
+
+/**
+ * Producto sintético rectangular (footprint = rectángulo w×h centrado). Sirve para
+ * armar cajas combinadas/contenedoras reutilizando los generadores de dielines, que
+ * derivan las medidas de product.x/y + clearance.
+ */
+export function rectProduct(w: number, h: number, z: number): ProductModel {
+  const hw = w / 2, hh = h / 2;
+  const footprint: Pt[] = [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]];
+  return { x: w, y: h, z, footprint, slices: [footprint] };
+}
