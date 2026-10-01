@@ -289,7 +289,8 @@ export function buildSuspensionInsert(p: Params): makerjs.IModel {
  */
 export function buildMultiInsert(
   p: Params, products: { footprint: Pt[]; slices: Pt[][]; x: number; y: number }[],
-  positions: { x: number; y: number }[]
+  positions: { x: number; y: number }[],
+  opts?: { subtractNested?: boolean }
 ): makerjs.IModel {
   const { L, W, H } = innerDims(p);
   const N = Math.max(1, Math.floor(p.sliceCount));
@@ -311,13 +312,27 @@ export function buildMultiInsert(
     add(line([0, y0], [0, y1], LAYER.CUT));
     add(line([L, y0], [L, y1], LAYER.CUT));
     // Una ventana por producto en esta repisa (sección k de cada producto).
+    const wcx: number[] = [], wcy: number[] = [];
     products.forEach((pr, i) => {
       const pos = positions[i] ?? { x: 0, y: 0 };
       const cx = pos.x + p.clearance;
       const cy = y0 + pos.y + p.clearance;
+      wcx[i] = cx; wcy[i] = cy;
       const sec = pr.slices[Math.min(pr.slices.length - 1, N - 1 - k)] ?? pr.footprint;
       models[`repisa${k}_${i}`] = buildWindow({ ...p, product: { ...p.product, x: pr.x, y: pr.y } }, sec, cx, cy);
     });
+    // Caja anidada: la ventana del producto (0) deja un ANILLO DE SOPORTE alrededor
+    // de cada caja chica (restamos su huella + anillo), para que la caja chica apoye.
+    if (opts?.subtractNested && products.length > 1) {
+      let prod0 = models[`repisa${k}_0`];
+      for (let i = 1; i < products.length; i++) {
+        const ring = Math.max(4, p.gripMargin) + 5;
+        const rect = rectLines(wcx[i] - (products[i].x / 2 + ring), wcy[i] - (products[i].y / 2 + ring),
+          products[i].x + 2 * ring, products[i].y + 2 * ring, LAYER.CUT);
+        try { prod0 = makerjs.model.combineSubtraction(makerjs.cloneObject(prod0), rect); } catch { /* deja la ventana original */ }
+      }
+      models[`repisa${k}_0`] = prod0;
+    }
     y = y1;
     if (k < N - 1 && spacing > 0) {
       add(line([0, y], [L, y], LAYER.CREASE)); // repisa -> montante

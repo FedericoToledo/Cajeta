@@ -15,6 +15,7 @@ export interface ViewItem {
 interface Props {
   items: ViewItem[];
   positions?: { x: number; y: number; z?: number }[]; // centro (plano XY) + z vertical, centrado en origen
+  box?: { cx: number; cy: number; w: number; h: number; z: number }; // caja envolvente (wireframe)
 }
 
 /** Rotación del mesh que replica EXACTAMENTE analyze (flip → eje vertical → giro) y lleva Z↑ a Y↑. */
@@ -31,20 +32,23 @@ function orientationQuat(o?: Orientation): THREE.Quaternion {
   return q.setFromRotationMatrix(zy.multiply(planar).multiply(orient).multiply(flip));
 }
 
-export default function Viewer3D({ items, positions }: Props) {
+export default function Viewer3D({ items, positions, box }: Props) {
   const mountRef = useRef<HTMLDivElement>(null);
   const groupRef = useRef<THREE.Group | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const controlsRef = useRef<OrbitControls | null>(null);
 
   // Inicializa la escena una sola vez.
   useEffect(() => {
     const mount = mountRef.current!;
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x0f172a);
+    scene.background = new THREE.Color(0x201711);
     sceneRef.current = scene;
 
-    const camera = new THREE.PerspectiveCamera(45, mount.clientWidth / mount.clientHeight, 0.1, 10000);
+    const camera = new THREE.PerspectiveCamera(45, mount.clientWidth / mount.clientHeight, 0.1, 100000);
     camera.position.set(160, 160, 160);
+    cameraRef.current = camera;
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(mount.clientWidth, mount.clientHeight);
@@ -53,12 +57,13 @@ export default function Viewer3D({ items, positions }: Props) {
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
+    controlsRef.current = controls;
 
     scene.add(new THREE.AmbientLight(0xffffff, 0.6));
     const dir = new THREE.DirectionalLight(0xffffff, 0.9);
     dir.position.set(1, 1, 1);
     scene.add(dir);
-    scene.add(new THREE.GridHelper(400, 40, 0x334155, 0x1e293b));
+    scene.add(new THREE.GridHelper(2000, 40, 0x4a3627, 0x2b2018));
 
     let raf = 0;
     const animate = () => { raf = requestAnimationFrame(animate); controls.update(); renderer.render(scene, camera); };
@@ -81,9 +86,10 @@ export default function Viewer3D({ items, positions }: Props) {
   }, []);
 
   // (Re)construye los meshes cuando cambian los items, orientaciones o posiciones.
-  const sig = JSON.stringify(
-    items.map((it, i) => [it.id, it.orientation?.up, it.orientation?.rotateDeg, it.orientation?.flip, positions?.[i]?.x, positions?.[i]?.y, positions?.[i]?.z])
-  );
+  const sig = JSON.stringify([
+    items.map((it, i) => [it.id, it.orientation?.up, it.orientation?.rotateDeg, it.orientation?.flip, positions?.[i]?.x, positions?.[i]?.y, positions?.[i]?.z]),
+    box && [box.cx.toFixed(1), box.cy.toFixed(1), box.w.toFixed(1), box.h.toFixed(1), box.z.toFixed(1)],
+  ]);
   useEffect(() => {
     const scene = sceneRef.current;
     if (!scene) return;
@@ -106,8 +112,31 @@ export default function Viewer3D({ items, positions }: Props) {
       if (p) mesh.position.set(p.x, p.z ?? 0, p.y);
       group.add(mesh);
     });
+    // Caja envolvente (cómo queda la caja final) como wireframe.
+    if (box && box.w > 0 && box.h > 0) {
+      const edges = new THREE.EdgesGeometry(new THREE.BoxGeometry(box.w, Math.max(1, box.z), box.h));
+      const wire = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0xd59248 }));
+      wire.position.set(box.cx, Math.max(1, box.z) / 2, box.cy);
+      group.add(wire);
+    }
     scene.add(group);
     groupRef.current = group;
+    // Encuadre automático (zoom out) para que entre todo.
+    const cam = cameraRef.current, ctr = controlsRef.current;
+    if (cam && ctr) {
+      group.updateMatrixWorld(true);
+      const bb = new THREE.Box3().setFromObject(group);
+      if (!bb.isEmpty()) {
+        const center = bb.getCenter(new THREE.Vector3());
+        const size = bb.getSize(new THREE.Vector3());
+        const maxDim = Math.max(size.x, size.y, size.z) || 1;
+        const dist = (maxDim / (2 * Math.tan((cam.fov * Math.PI) / 360))) * 1.5;
+        const d = new THREE.Vector3(1, 0.8, 1).normalize();
+        cam.position.copy(center).addScaledVector(d, dist);
+        cam.near = Math.max(0.5, dist / 200); cam.far = dist * 200; cam.updateProjectionMatrix();
+        ctr.target.copy(center); ctr.update();
+      }
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sig]);
 

@@ -1,9 +1,9 @@
 {
-  "name": "cajeta",
+  "name": "vexionbox",
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Webapp: STL -> caja de carton (bandeja + tapa) con insert de suspension -> DXF para router CNC",
+  "description": "VexionBox: STL -> cajas de carton e inserts de suspension -> DXF/PDF para CNC y SVG para grabadora laser. Herramienta de Vexion.ar.",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",

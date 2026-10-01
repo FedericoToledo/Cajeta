@@ -1,4 +1,7 @@
-# Cajeta 📦
+# VexionBox 📦
+
+> Herramienta de uso gratuito de **Vexion.ar** — todos los derechos reservados.
+
 
 Webapp que toma el **STL de un producto** y genera el desarrollo plano (dieline) de una
 **caja de cartón tipo bandeja + tapa** con un **insert de suspensión por capas** para

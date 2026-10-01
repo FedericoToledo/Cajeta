@@ -23,6 +23,12 @@ function isBinary(buffer: ArrayBuffer): boolean {
 function parseBinary(buffer: ArrayBuffer): ParsedSTL {
   const view = new DataView(buffer);
   const nTriangles = view.getUint32(80, true);
+  // Validación anti-DoS: el header no puede declarar más triángulos de los que
+  // caben en el archivo (evita asignar un Float32Array gigante por un header falso).
+  const needed = 84 + nTriangles * 50;
+  if (nTriangles === 0 || needed > buffer.byteLength || nTriangles > 50_000_000) {
+    throw new Error("STL binario inválido o corrupto.");
+  }
   const vertices = new Float32Array(nTriangles * 9);
   let offset = 84;
   let vi = 0;

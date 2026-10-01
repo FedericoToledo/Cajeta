@@ -20,6 +20,8 @@ interface Props {
   items: FoldItem[];
   products: ProductModel[];   // productos reales (para ventanas del insert y suspensión)
   positions: { x: number; y: number; z?: number }[]; // centros (plano) + z vertical, centrados en origen
+  nestedVolumes?: { parent: number; w: number; h: number; z: number; relX: number; relY: number }[];
+  outerIdx?: number; // índice del producto grande (caja externa) en Modo B
   placements?: Placement[];
   images?: DesignImage[];
 }
@@ -410,25 +412,29 @@ function FoldViewer({ title, build, signature }: { title: string; build: () => B
   const sceneRef = useRef<THREE.Scene | null>(null);
   const rootRef = useRef<THREE.Group | null>(null);
   const applyRef = useRef<FoldFn>(() => {});
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const controlsRef = useRef<OrbitControls | null>(null);
   const [fold, setFold] = useState(1);
   const [playing, setPlaying] = useState(false);
 
   useEffect(() => {
     const mount = mountRef.current!;
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x0f172a);
+    scene.background = new THREE.Color(0x201711);
     sceneRef.current = scene;
     const camera = new THREE.PerspectiveCamera(45, mount.clientWidth / mount.clientHeight, 0.1, 100000);
     camera.position.set(190, 160, 230);
+    cameraRef.current = camera;
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(mount.clientWidth, mount.clientHeight);
     renderer.setPixelRatio(window.devicePixelRatio);
     mount.appendChild(renderer.domElement);
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
+    controlsRef.current = controls;
     scene.add(new THREE.AmbientLight(0xffffff, 0.75));
     const dir = new THREE.DirectionalLight(0xffffff, 0.9); dir.position.set(1, 1.5, 1); scene.add(dir);
-    scene.add(new THREE.GridHelper(600, 30, 0x334155, 0x1e293b));
+    scene.add(new THREE.GridHelper(2000, 40, 0x4a3627, 0x2b2018));
     let raf = 0;
     const animate = () => { raf = requestAnimationFrame(animate); controls.update(); renderer.render(scene, camera); };
     animate();
@@ -454,6 +460,22 @@ function FoldViewer({ title, build, signature }: { title: string; build: () => B
       scene.add(built.root);
       applyRef.current = built.setFold;
       applyRef.current(fold);
+      // Encuadre automático (zoom out) para que entre toda la pieza.
+      const cam = cameraRef.current, ctr = controlsRef.current;
+      if (cam && ctr) {
+        built.root.updateMatrixWorld(true);
+        const bb = new THREE.Box3().setFromObject(built.root);
+        if (!bb.isEmpty()) {
+          const center = bb.getCenter(new THREE.Vector3());
+          const size = bb.getSize(new THREE.Vector3());
+          const maxDim = Math.max(size.x, size.y, size.z) || 1;
+          const dist = (maxDim / (2 * Math.tan((cam.fov * Math.PI) / 360))) * 1.5;
+          const d = new THREE.Vector3(0.9, 0.7, 1.2).normalize();
+          cam.position.copy(center).addScaledVector(d, dist);
+          cam.near = Math.max(0.5, dist / 200); cam.far = dist * 200; cam.updateProjectionMatrix();
+          ctr.target.copy(center); ctr.update();
+        }
+      }
     } catch (e) {
       // Una geometría inválida no debe tumbar la app: log y escena vacía.
       console.error("Error al generar el plegado 3D:", e);
@@ -492,7 +514,7 @@ function FoldViewer({ title, build, signature }: { title: string; build: () => B
   );
 }
 
-export default function FoldSim({ params, mode, items, products, positions, placements = [], images = [] }: Props) {
+export default function FoldSim({ params, mode, items, products, positions, nestedVolumes = [], outerIdx = 0, placements = [], images = [] }: Props) {
   // Precarga las imágenes subidas a <img> para poder usarlas como textura.
   const [loaded, setLoaded] = useState<Record<string, HTMLImageElement>>({});
   useEffect(() => {
@@ -530,24 +552,39 @@ export default function FoldSim({ params, mode, items, products, positions, plac
   const structSig = `${params.sliceCount}|${params.boxType}|${params.topFlaps}|${mode}|${items.length}`;
   useEffect(() => { setNonce((n) => n + 1); }, [structSig]);
 
-  const boxTitle = mode === "individual-boxes" ? "Contenedora + cajas" : "Caja";
-
   return (
     <div className="foldgrid">
       <div className="fold-actions">
         <button onClick={() => setNonce((n) => n + 1)}>🔄 Actualizar plegado</button>
         <span className="meta">Se genera con la disposición actual; actualizá tras acomodar los productos.</span>
       </div>
-      <FoldViewer title={boxTitle} signature={`box|${nonce}`}
-        build={() => buildBox(params, mode, items, products, positions, decor)} />
       {mode === "individual-boxes" ? (
-        <div className="foldsim">
-          <div className="foldtitle">Cajas individuales</div>
-          <div className="empty">Cada caja se arma por separado — mirá las dielines 2D / DXF de "Cajas individuales".</div>
-        </div>
+        <>
+          {/* Caja externa: el producto grande suspendido + las cajas chicas como volúmenes. */}
+          <FoldViewer title="Caja externa (contiene todo)" signature={`outer|${nonce}`}
+            build={() => {
+              const built = buildBox(params, "single-insert", items[outerIdx] ? [items[outerIdx]] : [], products[outerIdx] ? [products[outerIdx]] : [], [positions[outerIdx] ?? { x: 0, y: 0, z: 0 }], decor);
+              nestedVolumes.forEach((v) => {
+                const g = new THREE.BoxGeometry(v.w, params.trayWallHeight, v.h);
+                const box = new THREE.Mesh(g, mat(0.32, 0xd59248));
+                box.position.set(v.relX, params.trayWallHeight / 2, v.relY);
+                built.root.add(box);
+              });
+              return built;
+            }} />
+          {/* Cada caja chica: su propio armado. */}
+          {items.map((it, i) => (i === outerIdx ? null : (
+            <FoldViewer key={it.id} title={`Caja ${i + 1} — armado`} signature={`box${i}|${nonce}`}
+              build={() => buildBox({ ...params, product: products[i] }, "single-insert", [it], [products[i]], [{ x: 0, y: 0, z: 0 }])} />
+          )))}
+        </>
       ) : (
-        <FoldViewer title="Insert" signature={`ins|${nonce}`}
-          build={() => buildInsertMulti(params, items, products, positions)} />
+        <>
+          <FoldViewer title="Caja" signature={`box|${nonce}`}
+            build={() => buildBox(params, mode, items, products, positions, decor)} />
+          <FoldViewer title="Insert" signature={`ins|${nonce}`}
+            build={() => buildInsertMulti(params, items, products, positions)} />
+        </>
       )}
     </div>
   );

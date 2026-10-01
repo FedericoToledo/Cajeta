@@ -209,6 +209,14 @@ check("individual: contenedora es una caja válida", toDXF(cont).includes("PLIEG
 check("individual: 3 cajas con insert (bandeja+tapa+insert c/u)", boxKeys.length === 9, `(${boxKeys.length})`);
 const bwi = assembleBoxWithInsert(params, prods[0]);
 check("boxWithInsert: bandeja+tapa+insert", Object.keys((bwi as any).models).length === 3);
+
+// Caja con una caja anidada: el insert soporta producto + caja chica.
+const nestedChild = { product: rectProduct(30, 30, 15), relX: 10, relY: 8 };
+const bwiNest = assembleBoxWithInsert(params, prods[0], [nestedChild]);
+const insNest = (bwiNest as any).models.insert.models;
+const repNest = Object.keys(insNest).filter((k) => k.startsWith("repisa"));
+// sliceCount=3 × (producto + 1 anidada) = 6 ventanas
+check("anidado: insert con abertura para producto + caja chica", repNest.length === params.sliceCount * 2, `(${repNest.length})`);
 // Dielines no se superponen: piezas consecutivas separadas al menos GAP en X.
 const bwiModels = (bwi as any).models;
 const exts = Object.values(bwiModels).map((m: any) => makerjs.measure.modelExtents(m)).sort((a: any, b: any) => a.low[0] - b.low[0]);

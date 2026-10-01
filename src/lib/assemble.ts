@@ -108,11 +108,45 @@ export function assembleContainer(p: Params, products: ProductModel[]): makerjs.
   return assembleBox({ ...p, product: packBoxes(p, products).product });
 }
 
-/** Una caja individual + su insert de suspensión, en fila para exportar/descargar. */
-export function assembleBoxWithInsert(p: Params, product: ProductModel): makerjs.IModel {
+/** Caja anidada dentro de otra: producto rectangular (huella exterior) + posición relativa. */
+export interface NestedChild { product: ProductModel; relX: number; relY: number; }
+
+/**
+ * Una caja individual + su insert de suspensión. Si lleva cajas anidadas (`nested`),
+ * el insert soporta el producto propio Y una abertura por cada caja chica (su huella),
+ * en su posición relativa al centro de la caja grande.
+ */
+export function assembleBoxWithInsert(p: Params, product: ProductModel, nested: NestedChild[] = []): makerjs.IModel {
   const pp = { ...p, product };
   const pieces: Placed[] = boxPieces(pp).map((pc) => ({ key: pc.key, model: pc.model }));
-  pieces.push({ key: "insert", model: buildSuspensionInsert(pp) });
+  const insert = nested.length
+    ? buildMultiInsert(
+        pp,
+        [product, ...nested.map((n) => n.product)],
+        [
+          { x: product.x / 2, y: product.y / 2 },
+          ...nested.map((n) => ({ x: product.x / 2 + n.relX, y: product.y / 2 + n.relY })),
+        ],
+        { subtractNested: true }
+      )
+    : buildSuspensionInsert(pp);
+  pieces.push({ key: "insert", model: insert });
+  return layout(pieces);
+}
+
+/**
+ * Caja EXTERNA (Modo B): su interior es el bounding de todo lo acomodado. El insert
+ * lleva la ventana del producto grande (índice 0 de `insertProducts`) + una abertura
+ * por cada caja chica (resto), en sus posiciones (corner-based dentro del bounding).
+ */
+export function assembleOuterBox(
+  p: Params, outerProduct: ProductModel,
+  insertProducts: { footprint: ProductModel["footprint"]; slices: ProductModel["slices"]; x: number; y: number }[],
+  insertPositions: { x: number; y: number }[]
+): makerjs.IModel {
+  const pp = { ...p, product: outerProduct };
+  const pieces: Placed[] = boxPieces(pp).map((pc) => ({ key: pc.key, model: pc.model }));
+  pieces.push({ key: "insert", model: buildMultiInsert(pp, insertProducts, insertPositions, { subtractNested: true }) });
   return layout(pieces);
 }
 

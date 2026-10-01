@@ -55,8 +55,16 @@ export function toSVG(
   return svg;
 }
 
+/** Escapa texto para interpolar de forma segura en HTML (evita XSS por nombre de archivo). */
+function escapeHTML(s: string): string {
+  return s.replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] as string)
+  );
+}
+
 /** Página HTML A4 imprimible (para "guardar como PDF") con el dieline a escala. */
 export function printableHTML(model: makerjs.IModel, title: string): string {
+  const safe = escapeHTML(title);
   const e = makerjs.measure.modelExtents(model);
   const w = e ? e.high[0] - e.low[0] : 100;
   const h = e ? e.high[1] - e.low[1] : 100;
@@ -69,10 +77,10 @@ export function printableHTML(model: makerjs.IModel, title: string): string {
     `<svg width="${(w * scale).toFixed(1)}mm" height="${(h * scale).toFixed(1)}mm"`
   );
   const label = scale < 1 ? `Escala 1:${(1 / scale).toFixed(2)}` : "Escala 1:1";
-  return `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title>
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${safe}</title>
 <style>@page{size:A4;margin:${margin}mm} body{margin:0;font-family:system-ui,sans-serif}
 .lbl{font-size:11px;margin:0 0 6px} @media print{.hint{display:none}}</style></head>
-<body><div class="lbl"><b>${title}</b> — ${label} (real ${w.toFixed(0)}×${h.toFixed(0)} mm)</div>
+<body><div class="lbl"><b>${safe}</b> — ${label} (real ${w.toFixed(0)}×${h.toFixed(0)} mm)</div>
 <div class="hint" style="font-size:11px;color:#666;margin-bottom:8px">Imprimí como PDF en A4 al 100% (sin "ajustar a página").</div>
 ${svg}</body></html>`;
 }

@@ -6,12 +6,12 @@ import DesignView from "./components/DesignView";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { DesignImage, Placement } from "./lib/design";
 import { parseSTL, ParsedSTL } from "./lib/stl";
-import { analyze, Orientation } from "./lib/product";
+import { analyze, rectProduct, Orientation } from "./lib/product";
 import { bestOrientation } from "./lib/optimize";
 import { Params, BoxMode, defaultParams } from "./lib/types";
 import {
   assembleBox, assembleInsert, assembleMultiBox, assembleMultiInsert,
-  assembleContainer, assembleBoxWithInsert, packProducts, packBoxes,
+  assembleBoxWithInsert, assembleOuterBox, packProducts, packBoxes,
 } from "./lib/assemble";
 import { toDXF, toSVG, download, printableHTML } from "./lib/exporters";
 import makerjs from "makerjs";
@@ -106,14 +106,72 @@ export default function App() {
   );
   const posCenteredXY = useMemo(() => positions.map((p) => ({ x: p.x, y: p.y })), [positions]);
 
+  // Caja EXTERNA (la que contiene todo): la de mayor huella.
+  const outerIdx = useMemo(() => {
+    if (!products.length) return 0;
+    const sizes = packInfo && "sizes" in packInfo ? (packInfo as { sizes: { w: number; h: number }[] }).sizes : products.map((p) => ({ w: p.x, h: p.y }));
+    let best = 0, bestA = -1;
+    products.forEach((_, i) => { const a = sizes[i].w * sizes[i].h; if (a > bestA) { bestA = a; best = i; } });
+    return best;
+  }, [products, packInfo]);
+
+  // Caja EXTERNA (Modo B): su interior = bounding de TODO lo acomodado (producto grande +
+  // cajas chicas en su disposición). Las posiciones se recentran en esa caja; las chicas
+  // van como cajas adentro (aberturas en el insert).
+  const outerBoxB = useMemo(() => {
+    if (effMode !== "individual-boxes" || !boxParams || !products.length || !packInfo || !("sizes" in packInfo)) return null;
+    const sizes = (packInfo as { sizes: { w: number; h: number }[] }).sizes;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    products.forEach((pr, i) => {
+      const hw = i === outerIdx ? pr.x / 2 : sizes[i].w / 2; // el grande por su huella; las chicas por su caja exterior
+      const hh = i === outerIdx ? pr.y / 2 : sizes[i].h / 2;
+      minX = Math.min(minX, positions[i].x - hw); maxX = Math.max(maxX, positions[i].x + hw);
+      minY = Math.min(minY, positions[i].y - hh); maxY = Math.max(maxY, positions[i].y + hh);
+    });
+    if (!isFinite(minX)) return null;
+    const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2, W = maxX - minX, H = maxY - minY;
+    const zmax = products.reduce((m, pr) => Math.max(m, pr.z), 0);
+    return {
+      product: rectProduct(W, H, zmax), W, H, sizes,
+      relPos: positions.map((p) => ({ x: p.x - cx, y: p.y - cy, z: p.z })),
+    };
+  }, [effMode, boxParams, products, packInfo, positions, outerIdx]);
+
+  // Volúmenes de las cajas chicas (dentro de la caja externa) para el 3D.
+  const nestedVolumes = useMemo(() => {
+    if (!outerBoxB) return [] as { parent: number; w: number; h: number; z: number; relX: number; relY: number }[];
+    return products.map((_, k) => k).filter((k) => k !== outerIdx).map((k) => ({
+      parent: outerIdx, w: outerBoxB.sizes[k].w, h: outerBoxB.sizes[k].h, z: products[k].z,
+      relX: outerBoxB.relPos[k].x, relY: outerBoxB.relPos[k].y,
+    }));
+  }, [outerBoxB, products, outerIdx]);
+
+  // Caja envolvente para el paso "Organizar" (wireframe de cómo queda la caja).
+  const organizeBox = useMemo(() => {
+    if (!boxParams || !products.length || !positions.length) return undefined;
+    const sizes = packInfo && "sizes" in packInfo ? (packInfo as { sizes: { w: number; h: number }[] }).sizes : null;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    products.forEach((pr, i) => {
+      const small = effMode === "individual-boxes" && sizes && i !== outerIdx;
+      const hw = small ? sizes[i].w / 2 : pr.x / 2;
+      const hh = small ? sizes[i].h / 2 : pr.y / 2;
+      minX = Math.min(minX, positions[i].x - hw); maxX = Math.max(maxX, positions[i].x + hw);
+      minY = Math.min(minY, positions[i].y - hh); maxY = Math.max(maxY, positions[i].y + hh);
+    });
+    if (!isFinite(minX)) return undefined;
+    const c = boxParams.clearance;
+    const z = products.reduce((m, pr) => Math.max(m, pr.z), 0) + c;
+    return { cx: (minX + maxX) / 2, cy: (minY + maxY) / 2, w: maxX - minX + 2 * c, h: maxY - minY + 2 * c, z };
+  }, [boxParams, products, packInfo, positions, effMode, outerIdx]);
+
   // Producto sintético para caja/decoración (combinado en A, contenedora en B).
   const designParams = useMemo<Params | null>(() => {
     if (!boxParams || !products.length || !selItem) return null;
     const product = effMode === "individual-boxes"
-      ? packBoxes(boxParams, products).product
+      ? (outerBoxB?.product ?? products[outerIdx]) // la caja externa contiene todo; se decora sobre ella
       : single ? products[0] : packProducts(boxParams, products).product;
     return { ...boxParams, product, orientation: selItem.orientation };
-  }, [boxParams, products, effMode, single, selItem]);
+  }, [boxParams, products, effMode, single, selItem, outerIdx, outerBoxB]);
 
   // Entregables 2D (cada uno descargable por separado como DXF/PDF).
   interface Deliverable { id: string; title: string; model: makerjs.IModel; svg: string }
@@ -124,11 +182,24 @@ export default function App() {
     });
     try {
       if (effMode === "individual-boxes") {
-        const out = [make("contenedora", "Contenedora", assembleContainer(boxParams, products))];
-        products.forEach((pr, i) => {
-          const name = items[i]?.name ? ` — ${items[i].name}` : "";
-          out.push(make(`caja${i}`, `Caja ${i + 1}${name} (con insert)`, assembleBoxWithInsert(boxParams, pr)));
-        });
+        const out: Deliverable[] = [];
+        const ob = outerBoxB;
+        if (ob && products.length > 1) {
+          // Caja externa (contiene todo): insert con el producto grande (contorno) +
+          // una abertura por cada caja chica, en su posición dentro del bounding.
+          const others = products.map((_, k) => k).filter((k) => k !== outerIdx);
+          const insertProducts = [products[outerIdx], ...others.map((k) => rectProduct(ob.sizes[k].w, ob.sizes[k].h, products[k].z))];
+          const cornerOf = (i: number) => ({ x: ob.relPos[i].x + ob.W / 2, y: ob.relPos[i].y + ob.H / 2 });
+          const insertPositions = [cornerOf(outerIdx), ...others.map(cornerOf)];
+          const bigName = items[outerIdx]?.name ? ` — ${items[outerIdx].name}` : "";
+          out.push(make("externa", `Caja externa${bigName} (contiene todo)`, assembleOuterBox(boxParams, ob.product, insertProducts, insertPositions)));
+          others.forEach((k) => {
+            const nm = items[k]?.name ? ` — ${items[k].name}` : "";
+            out.push(make(`caja${k}`, `Caja${nm}`, assembleBoxWithInsert(boxParams, products[k])));
+          });
+        } else {
+          products.forEach((pr, i) => out.push(make(`caja${i}`, `Caja ${i + 1}`, assembleBoxWithInsert(boxParams, pr))));
+        }
         return out;
       }
       return [
@@ -138,7 +209,7 @@ export default function App() {
           single ? assembleInsert({ ...boxParams, product: products[0] }) : assembleMultiInsert(boxParams, products, posCenteredXY)),
       ];
     } catch (e) { setError((e as Error).message); return []; }
-  }, [boxParams, products, effMode, single, posCenteredXY, items]);
+  }, [boxParams, products, effMode, single, posCenteredXY, items, outerBoxB, outerIdx]);
 
   const openPrint = (html: string) => {
     const w = window.open("", "_blank");
@@ -147,10 +218,10 @@ export default function App() {
     setTimeout(() => w.print(), 400);
   };
   const exportDXF = (model: makerjs.IModel | null, name: string) => {
-    if (model) download(`cajeta_${name}.dxf`, toDXF(model), "application/dxf");
+    if (model) download(`vexionbox_${name}.dxf`, toDXF(model), "application/dxf");
   };
   const exportPDF = (model: makerjs.IModel | null, title: string) => {
-    if (model) openPrint(printableHTML(model, `Cajeta — ${title}`));
+    if (model) openPrint(printableHTML(model, `VexionBox — ${title}`));
   };
 
   const hasItems = items.length > 0 && !!boxParams;
@@ -158,8 +229,17 @@ export default function App() {
   return (
     <div className="app">
       <header>
-        <h1>Cajeta</h1>
-        <p>1 · Organizá los productos → 2 · Plegado y cortes (DXF/PDF) → 3 · Diseño para láser</p>
+        <div className="brand">
+          <h1>VexionBox</h1>
+          <p>1 · Organizá los productos → 2 · Plegado y cortes (DXF/PDF) → 3 · Diseño para láser</p>
+        </div>
+        <div className="legal">
+          <em>
+            Todos los derechos reservados por{" "}
+            <a href="https://vexion.ar" target="_blank" rel="noopener noreferrer">Vexion.ar</a>.
+            <br />Herramienta de uso gratuito.
+          </em>
+        </div>
       </header>
 
       <div className="layout">
@@ -230,6 +310,7 @@ export default function App() {
                 <Viewer3D
                   items={items.map((it) => ({ id: it.id, buffer: it.buffer, orientation: it.orientation }))}
                   positions={positions}
+                  box={organizeBox}
                 />
                 <p className="stage-hint">Acomodá los productos (orientación y desplazamiento). Los cortes se generan en el paso 2.</p>
               </div>
@@ -242,7 +323,9 @@ export default function App() {
                       mode={effMode}
                       items={items.map((it) => ({ id: it.id, buffer: it.buffer, orientation: it.orientation }))}
                       products={products}
-                      positions={positions}
+                      positions={effMode === "individual-boxes" && outerBoxB ? outerBoxB.relPos : positions}
+                      nestedVolumes={nestedVolumes}
+                      outerIdx={outerIdx}
                       placements={placements}
                       images={images}
                     />
