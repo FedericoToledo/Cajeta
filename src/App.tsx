@@ -10,7 +10,7 @@ import { analyze, rectProduct, Orientation } from "./lib/product";
 import { bestOrientation } from "./lib/optimize";
 import { Params, BoxMode, defaultParams } from "./lib/types";
 import {
-  assembleBox, assembleInsert, assembleMultiBox, assembleMultiInsert,
+  assembleBox, assembleInsert, assembleMultiInsert,
   assembleBoxWithInsert, assembleOuterBox, packProducts, packBoxes,
 } from "./lib/assemble";
 import { toDXF, toSVG, download, printableHTML } from "./lib/exporters";
@@ -167,6 +167,26 @@ export default function App() {
     };
   }, [effMode, boxParams, products, packInfo, positions, outerIdx]);
 
+  // Modo A (insert único) con varios productos: la caja se ajusta al bounding REAL de los
+  // productos ya ubicados (incluye el desplazamiento manual), y recentra las posiciones en
+  // él. Así no queda espacio muerto de un costado cuando se mueve un producto hacia adentro.
+  const fitA = useMemo(() => {
+    if (effMode === "individual-boxes" || single || !products.length || positions.length < products.length) return null;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    products.forEach((pr, i) => {
+      const hw = pr.x / 2, hh = pr.y / 2;
+      minX = Math.min(minX, positions[i].x - hw); maxX = Math.max(maxX, positions[i].x + hw);
+      minY = Math.min(minY, positions[i].y - hh); maxY = Math.max(maxY, positions[i].y + hh);
+    });
+    if (!isFinite(minX)) return null;
+    const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2, W = maxX - minX, H = maxY - minY;
+    const zmax = products.reduce((m, pr) => Math.max(m, pr.z), 0);
+    return {
+      product: rectProduct(W, H, zmax),
+      relPos: positions.map((p) => ({ x: p.x - cx, y: p.y - cy, z: p.z })),
+    };
+  }, [effMode, single, products, positions]);
+
   // Volúmenes de las cajas chicas (dentro de la caja externa) para el 3D.
   const nestedVolumes = useMemo(() => {
     if (!outerBoxB) return [] as { parent: number; w: number; h: number; z: number; relX: number; relY: number }[];
@@ -181,9 +201,9 @@ export default function App() {
     if (!boxParams || !products.length || !selItem) return null;
     const product = effMode === "individual-boxes"
       ? (outerBoxB?.product ?? products[outerIdx]) // la caja externa contiene todo; se decora sobre ella
-      : single ? products[0] : packProducts(boxParams, products).product;
+      : single ? products[0] : (fitA?.product ?? packProducts(boxParams, products).product);
     return { ...boxParams, product, orientation: selItem.orientation };
-  }, [boxParams, products, effMode, single, selItem, outerIdx, outerBoxB]);
+  }, [boxParams, products, effMode, single, selItem, outerIdx, outerBoxB, fitA]);
 
   // Entregables 2D (cada uno descargable por separado como DXF/PDF).
   interface Deliverable { id: string; title: string; model: makerjs.IModel; svg: string }
@@ -219,14 +239,19 @@ export default function App() {
         }
         return out;
       }
+      // La caja/insert combinados usan el bounding AJUSTADO a las posiciones reales (fitA),
+      // para que la caja envuelva los productos sin espacio muerto al desplazarlos.
+      const fitPos = fitA ? fitA.relPos.map((p) => ({ x: p.x, y: p.y })) : posCenteredXY;
       return [
         make("caja", single ? "Caja" : "Caja combinada",
-          single ? assembleBox({ ...boxParams, product: products[0] }) : assembleMultiBox(boxParams, products)),
+          single ? assembleBox({ ...boxParams, product: products[0] })
+                 : assembleBox({ ...boxParams, product: fitA?.product ?? packProducts(boxParams, products).product })),
         make("insert", "Insert",
-          single ? assembleInsert({ ...boxParams, product: products[0] }) : assembleMultiInsert(boxParams, products, posCenteredXY)),
+          single ? assembleInsert({ ...boxParams, product: products[0] })
+                 : assembleMultiInsert(boxParams, products, fitPos, fitA?.product)),
       ];
     } catch (e) { setError((e as Error).message); return []; }
-  }, [boxParams, products, effMode, single, posCenteredXY, items, outerBoxB, outerIdx]);
+  }, [boxParams, products, effMode, single, posCenteredXY, items, outerBoxB, outerIdx, fitA]);
 
   const openPrint = (html: string) => {
     const w = window.open("", "_blank");
@@ -342,7 +367,7 @@ export default function App() {
                       mode={effMode}
                       items={items.map((it) => ({ id: it.id, buffer: it.buffer, orientation: it.orientation }))}
                       products={products}
-                      positions={effMode === "individual-boxes" && outerBoxB ? outerBoxB.relPos : positions}
+                      positions={effMode === "individual-boxes" && outerBoxB ? outerBoxB.relPos : (fitA?.relPos ?? positions)}
                       nestedVolumes={nestedVolumes}
                       outerIdx={outerIdx}
                       placements={placements}

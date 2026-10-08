@@ -81,12 +81,16 @@ export function assembleMultiBox(p: Params, products: ProductModel[]): makerjs.I
  * el desplazamiento manual del usuario); si se omite, se usa el empaquetado automático.
  */
 export function assembleMultiInsert(
-  p: Params, products: ProductModel[], posCentered?: { x: number; y: number }[]
+  p: Params, products: ProductModel[], posCentered?: { x: number; y: number }[],
+  combined?: ProductModel
 ): makerjs.IModel {
   const pk = packProducts(p, products);
-  const pp = { ...p, product: pk.product };
+  // `combined` (opcional): producto sintético de la caja ya ajustada al bounding real de las
+  // posiciones; si viene, los centros se convierten a esquina con SUS medidas (no las del pack).
+  const prod = combined ?? pk.product;
+  const pp = { ...p, product: prod };
   const corner = posCentered
-    ? posCentered.map((c) => ({ x: c.x + pk.W / 2, y: c.y + pk.H / 2 }))
+    ? posCentered.map((c) => ({ x: c.x + prod.x / 2, y: c.y + prod.y / 2 }))
     : pk.pos;
   return layout([{ key: "insert", model: buildMultiInsert(pp, products, corner) }]);
 }
