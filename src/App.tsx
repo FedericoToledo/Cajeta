@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Viewer3D from "./components/Viewer3D";
 import FoldSim from "./components/FoldSim";
 import Controls from "./components/Controls";
@@ -24,6 +24,7 @@ interface StlItem {
   stl: ParsedSTL;
   orientation: Orientation;
   offset: Offset; // desplazamiento manual (mm) para aprovechar mejor la caja
+  wantsInsert: boolean; // si lleva soporte/insert propio (solo aplica en "Cajas individuales")
 }
 
 const defaultOrientation = (): Orientation => ({ up: "z", rotateDeg: 0, flip: false });
@@ -46,7 +47,7 @@ export default function App() {
       try {
         const buf = await file.arrayBuffer();
         const stl = parseSTL(buf);
-        added.push({ id: `stl-${Math.random().toString(36).slice(2, 8)}`, name: file.name, buffer: buf, stl, orientation: defaultOrientation(), offset: { x: 0, y: 0, z: 0 } });
+        added.push({ id: `stl-${Math.random().toString(36).slice(2, 8)}`, name: file.name, buffer: buf, stl, orientation: defaultOrientation(), offset: { x: 0, y: 0, z: 0 }, wantsInsert: true });
       } catch (e) { setError((e as Error).message); }
     }
     if (!added.length) return;
@@ -69,6 +70,9 @@ export default function App() {
   const setItemOffset = (id: string, off: Offset) =>
     setItems((prev) => prev.map((it) => (it.id === id ? { ...it, offset: off } : it)));
 
+  const setItemWantsInsert = (id: string, wantsInsert: boolean) =>
+    setItems((prev) => prev.map((it) => (it.id === id ? { ...it, wantsInsert } : it)));
+
   // Productos reanalizados (dependen de cada orientación + secciones globales).
   const sliceCount = boxParams?.sliceCount ?? 3;
   const products = useMemo(
@@ -81,6 +85,32 @@ export default function App() {
   const selIdx = items.findIndex((it) => it.id === selectedId);
   const selItem = selIdx >= 0 ? items[selIdx] : items[0];
   const selProduct = selIdx >= 0 ? products[selIdx] : products[0];
+
+  // Altura del producto más alto: gobierna las medidas derivadas de la caja.
+  const govZ = useMemo(() => products.reduce((m, p) => Math.max(m, p.z), 0), [products]);
+  // Re-deriva alto de pared/tapa/solapa cuando cambia el producto (otro STL o
+  // reorientación), para que la caja ABRACE el producto y no desperdicie espacio.
+  // Respeta los valores que el usuario haya tocado a mano (si difieren del último auto).
+  const autoDerived = useRef<{ wall: number; lid: number; tab: number } | null>(null);
+  useEffect(() => {
+    if (!boxParams || !govZ) return;
+    const want = {
+      wall: Math.round((govZ + boxParams.clearance) * 10) / 10,
+      lid: Math.max(15, Math.round(govZ * 0.4)),
+      tab: Math.min(25, Math.max(12, Math.round(govZ * 0.6))),
+    };
+    const a = autoDerived.current;
+    setBoxParams((prev) => {
+      if (!prev) return prev;
+      const next = { ...prev };
+      if (!a || prev.trayWallHeight === a.wall) next.trayWallHeight = want.wall;
+      if (!a || prev.lidHeight === a.lid) next.lidHeight = want.lid;
+      if (!a || prev.cornerTab === a.tab) next.cornerTab = want.tab;
+      return next;
+    });
+    autoDerived.current = want;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [govZ, boxParams?.clearance]);
 
   const autoOrient = () => {
     if (!selItem || !boxParams) return;
@@ -146,24 +176,6 @@ export default function App() {
     }));
   }, [outerBoxB, products, outerIdx]);
 
-  // Caja envolvente para el paso "Organizar" (wireframe de cómo queda la caja).
-  const organizeBox = useMemo(() => {
-    if (!boxParams || !products.length || !positions.length) return undefined;
-    const sizes = packInfo && "sizes" in packInfo ? (packInfo as { sizes: { w: number; h: number }[] }).sizes : null;
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    products.forEach((pr, i) => {
-      const small = effMode === "individual-boxes" && sizes && i !== outerIdx;
-      const hw = small ? sizes[i].w / 2 : pr.x / 2;
-      const hh = small ? sizes[i].h / 2 : pr.y / 2;
-      minX = Math.min(minX, positions[i].x - hw); maxX = Math.max(maxX, positions[i].x + hw);
-      minY = Math.min(minY, positions[i].y - hh); maxY = Math.max(maxY, positions[i].y + hh);
-    });
-    if (!isFinite(minX)) return undefined;
-    const c = boxParams.clearance;
-    const z = products.reduce((m, pr) => Math.max(m, pr.z), 0) + c;
-    return { cx: (minX + maxX) / 2, cy: (minY + maxY) / 2, w: maxX - minX + 2 * c, h: maxY - minY + 2 * c, z };
-  }, [boxParams, products, packInfo, positions, effMode, outerIdx]);
-
   // Producto sintético para caja/decoración (combinado en A, contenedora en B).
   const designParams = useMemo<Params | null>(() => {
     if (!boxParams || !products.length || !selItem) return null;
@@ -195,10 +207,15 @@ export default function App() {
           out.push(make("externa", `Caja externa${bigName} (contiene todo)`, assembleOuterBox(boxParams, ob.product, insertProducts, insertPositions)));
           others.forEach((k) => {
             const nm = items[k]?.name ? ` — ${items[k].name}` : "";
-            out.push(make(`caja${k}`, `Caja${nm}`, assembleBoxWithInsert(boxParams, products[k])));
+            // Cajita sin soporte (ej. cables): caja plana, sin insert.
+            const model = items[k]?.wantsInsert === false
+              ? assembleBox({ ...boxParams, product: products[k] })
+              : assembleBoxWithInsert(boxParams, products[k]);
+            out.push(make(`caja${k}`, `Caja${nm}`, model));
           });
         } else {
-          products.forEach((pr, i) => out.push(make(`caja${i}`, `Caja ${i + 1}`, assembleBoxWithInsert(boxParams, pr))));
+          products.forEach((pr, i) => out.push(make(`caja${i}`, `Caja ${i + 1}`,
+            items[i]?.wantsInsert === false ? assembleBox({ ...boxParams, product: pr }) : assembleBoxWithInsert(boxParams, pr))));
         }
         return out;
       }
@@ -285,6 +302,9 @@ export default function App() {
               mode={mode}
               onMode={setMode}
               multiItem={items.length > 1}
+              wantsInsert={selItem.wantsInsert}
+              onWantsInsert={(v) => setItemWantsInsert(selItem.id, v)}
+              showInsertToggle={items.length > 1 && mode === "individual-boxes" && (selIdx >= 0 ? selIdx : 0) !== outerIdx}
             />
           )}
 
@@ -310,7 +330,6 @@ export default function App() {
                 <Viewer3D
                   items={items.map((it) => ({ id: it.id, buffer: it.buffer, orientation: it.orientation }))}
                   positions={positions}
-                  box={organizeBox}
                 />
                 <p className="stage-hint">Acomodá los productos (orientación y desplazamiento). Los cortes se generan en el paso 2.</p>
               </div>

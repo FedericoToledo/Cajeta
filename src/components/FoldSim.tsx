@@ -9,7 +9,7 @@ import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { Orientation, ProductModel } from "../lib/product";
 import { Params, BoxMode, innerDims } from "../lib/types";
-import { offsetConvex, Pt } from "../lib/polygon";
+import { offsetConvex, area, Pt } from "../lib/polygon";
 import { DesignImage, Placement, PieceKey, FaceKey } from "../lib/design";
 
 export interface FoldItem { id: string; buffer: ArrayBuffer; orientation?: Orientation; }
@@ -324,14 +324,38 @@ function winForSec(params: Params, pr: ProductModel, sec: Pt[] | undefined, inse
   return [[-wx / 2, -wy / 2], [wx / 2, -wy / 2], [wx / 2, wy / 2], [-wx / 2, wy / 2]];
 }
 
+/** ¿Está el punto (px,py) dentro del polígono? (ray casting). */
+function pointInPoly(px: number, py: number, poly: Pt[]): boolean {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i], [xj, yj] = poly[j];
+    if (yi > py !== yj > py && px < ((xj - xi) * (py - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
 /** Repisa (panel +Z desde su bisagra) con huecos ya calculados en coords de la repisa. */
 function shelfPanelMulti(width: number, depth: number, holes: Pt[][]): THREE.Mesh {
   const shape = new THREE.Shape();
   shape.moveTo(-width / 2, 0); shape.lineTo(width / 2, 0);
   shape.lineTo(width / 2, depth); shape.lineTo(-width / 2, depth); shape.closePath();
-  for (const poly of holes) {
-    if (poly.length < 3) continue;
-    if (poly.some(([x, y]) => Math.abs(x) > width / 2 || y < 0 || y > depth)) continue; // fuera de la repisa
+  // Sólo huecos válidos y dentro de la repisa.
+  const valid = holes.filter(
+    (poly) => poly.length >= 3 && !poly.some(([x, y]) => Math.abs(x) > width / 2 || y < 0 || y > depth)
+  );
+  // Descartamos huecos CONTENIDOS en otro hueco: un corte dentro de otro corte rompe la
+  // triangulación de ShapeGeometry (earcut no soporta huecos anidados) y además es material
+  // ya removido por el exterior. Comparamos por área para quitar sólo el interior.
+  const kept = valid.filter(
+    (poly, i) =>
+      !valid.some(
+        (other, j) =>
+          j !== i &&
+          Math.abs(area(other)) > Math.abs(area(poly)) &&
+          poly.every(([x, y]) => pointInPoly(x, y, other))
+      )
+  );
+  for (const poly of kept) {
     const hole = new THREE.Path();
     poly.forEach(([x, y], i) => (i === 0 ? hole.moveTo(x, y) : hole.lineTo(x, y)));
     hole.closePath();
@@ -383,6 +407,9 @@ function buildInsertMulti(
       const pos = positions[i] ?? { x: 0, y: 0 };
       const sec = pr.slices[Math.min(pr.slices.length - 1, N - 1 - k)] ?? pr.footprint;
       const win = winForSec(params, pr, sec, inset); // contorno centrado (fx,fy)
+      // La malla del producto mapea analyze-Y -> mundo -Z (orientationMatrix), así que su
+      // silueta real queda en (px, -py). La ventana se dibuja para coincidir con esa malla:
+      // -fx en X y -fy en profundidad (la paridad de la repisa invierte el signo en impares).
       return win.map(([fx, fy]) =>
         [-pos.x - fx, (even ? pos.y - fy : -pos.y + fy) + depthY / 2] as Pt);
     });
@@ -393,6 +420,18 @@ function buildInsertMulti(
       parent = riser;
     }
   }
+
+  // Patas laterales de la última repisa hasta el piso (apoyo, no voladizo).
+  const legH = Math.max(0, H - (N - 1) * spacing);
+  const legW = Math.min(depthY * 0.6, 40);
+  [-L / 2, L / 2].forEach((lx) => {
+    const g = new THREE.PlaneGeometry(legW, legH);
+    g.translate(0, legH / 2, 0); // base en el piso (y=0)
+    g.rotateY(Math.PI / 2); // panel en el plano Z-Y, en el lateral x=lx
+    const leg = new THREE.Mesh(g, mat(0.6, 0xf59e0b));
+    leg.position.set(lx, 0, 0);
+    root.add(leg);
+  });
 
   // Productos suspendidos (colgados de las repisas) en su posición.
   items.forEach((it, i) => {

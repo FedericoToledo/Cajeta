@@ -213,6 +213,32 @@ export function buildChest(p: Params): makerjs.IModel {
   return transpose(chestCanonical(W, L, H, p)); // interior W×L transpuesto -> L×W
 }
 
+/**
+ * Lados de una repisa del acordeón. En la ÚLTIMA repisa, cada lado lleva una PATA
+ * que baja al piso (bisagra en el borde, se pliega 90° hacia abajo) para que la
+ * repisa inferior no quede en voladizo. `legLen` = alto de esa repisa sobre el piso.
+ */
+function addShelfSides(
+  add: (p: makerjs.IPath) => void,
+  L: number, y0: number, y1: number, isLast: boolean, legLen: number, legW: number
+) {
+  if (!isLast || legLen <= 0) {
+    add(line([0, y0], [0, y1], LAYER.CUT));
+    add(line([L, y0], [L, y1], LAYER.CUT));
+    return;
+  }
+  const yMid = (y0 + y1) / 2, yA = yMid - legW / 2, yB = yMid + legW / 2;
+  ([[0, -1], [L, 1]] as [number, number][]).forEach(([xEdge, dir]) => {
+    add(line([xEdge, y0], [xEdge, yA], LAYER.CUT));
+    add(line([xEdge, yA], [xEdge, yB], LAYER.CREASE)); // bisagra de la pata
+    add(line([xEdge, yB], [xEdge, y1], LAYER.CUT));
+    const xFar = xEdge + dir * legLen;
+    add(line([xEdge, yA], [xFar, yA], LAYER.CUT));
+    add(line([xFar, yA], [xFar, yB], LAYER.CUT));
+    add(line([xFar, yB], [xEdge, yB], LAYER.CUT));
+  });
+}
+
 /** Geometría del insert compartida por dieline y simulador. */
 export interface InsertShelf {
   depthY: number; // profundidad de la repisa en la tira plana (= W interior)
@@ -256,13 +282,20 @@ export function buildSuspensionInsert(p: Params): makerjs.IModel {
   let ai = 0;
   const add = (pt: makerjs.IPath) => (paths[`a${ai++}`] = pt);
 
+  const legLen = Math.max(0, H - (N - 1) * sh.spacing); // alto de la última repisa sobre el piso
+  const legW = Math.min(sh.depthY * 0.6, 40);
   let y = W + H; // borde del fondo (bisagra a la primera repisa)
   for (let k = 0; k < N; k++) {
     const y0 = y, y1 = y + sh.depthY; // repisa de profundidad W
-    add(line([0, y0], [0, y1], LAYER.CUT)); // lados de la repisa
-    add(line([L, y0], [L, y1], LAYER.CUT));
+    addShelfSides(add, L, y0, y1, k === N - 1, legLen, legW); // lados (+ patas en la última)
     // Ventana de la sección: repisa k (0 = la más cercana al fondo = tope al plegar).
-    models[`repisa${k}`] = buildWindow(p, sh.slices[N - 1 - k], L / 2, (y0 + y1) / 2);
+    // En repisas impares (invertidas al plegar) reflejamos el contorno en y para que el
+    // perfil coincida con la pieza (sin efecto en secciones simétricas).
+    // La silueta real de la pieza está en (px, -py) (la malla mapea analyze-Y -> mundo -Z):
+    // reflejamos en y en repisas PARES; las impares (invertidas por el acordeón) van tal cual.
+    const sec0 = sh.slices[N - 1 - k];
+    const sec = k % 2 === 0 ? sec0.map(([fx, fy]) => [fx, -fy] as Pt).reverse() : sec0;
+    models[`repisa${k}`] = buildWindow(p, sec, L / 2, (y0 + y1) / 2);
     y = y1;
     if (k < N - 1 && sh.spacing > 0) {
       add(line([0, y], [L, y], LAYER.CREASE)); // repisa -> montante
@@ -306,19 +339,30 @@ export function buildMultiInsert(
   let ai = 0;
   const add = (pt: makerjs.IPath) => (paths[`a${ai++}`] = pt);
 
+  const legLen = Math.max(0, H - (N - 1) * spacing); // alto de la última repisa sobre el piso
+  const legW = Math.min(depthY * 0.6, 40);
   let y = W + H; // borde del fondo (bisagra a la primera repisa)
   for (let k = 0; k < N; k++) {
     const y0 = y, y1 = y + depthY;
-    add(line([0, y0], [0, y1], LAYER.CUT));
-    add(line([L, y0], [L, y1], LAYER.CUT));
+    const even = k % 2 === 0; // al plegar el acordeón, las repisas IMPARES quedan invertidas en profundidad
+    addShelfSides(add, L, y0, y1, k === N - 1, legLen, legW); // lados (+ patas en la última)
     // Una ventana por producto en esta repisa (sección k de cada producto).
     const wcx: number[] = [], wcy: number[] = [];
     products.forEach((pr, i) => {
       const pos = positions[i] ?? { x: 0, y: 0 };
       const cx = pos.x + p.clearance;
-      const cy = y0 + pos.y + p.clearance;
+      // La profundidad se mide desde el borde de bisagra (y0) en repisas pares y desde el
+      // opuesto (y1) en impares, porque el acordeón las invierte al plegar; así el producto
+      // baja RECTO por todas las ventanas (si no, en impares caían espejadas = zig-zag).
+      const bLocal = pos.y + p.clearance;
+      const cy = even ? y0 + bLocal : y1 - bLocal;
       wcx[i] = cx; wcy[i] = cy;
-      const sec = pr.slices[Math.min(pr.slices.length - 1, N - 1 - k)] ?? pr.footprint;
+      const sec0 = pr.slices[Math.min(pr.slices.length - 1, N - 1 - k)] ?? pr.footprint;
+      // La silueta REAL del producto (su malla 3D) está en (px, -py), porque la malla mapea
+      // analyze-Y -> mundo -Z. Para que la ventana coincida con la pieza al plegar: en repisas
+      // PARES reflejamos el contorno en y (.reverse() mantiene el winding CCW de offsetConvex);
+      // las IMPARES, ya invertidas por el acordeón, lo usan tal cual.
+      const sec = even ? sec0.map(([fx, fy]) => [fx, -fy] as Pt).reverse() : sec0;
       models[`repisa${k}_${i}`] = buildWindow({ ...p, product: { ...p.product, x: pr.x, y: pr.y } }, sec, cx, cy);
     });
     // Caja anidada: la ventana del producto (0) deja un ANILLO DE SOPORTE alrededor

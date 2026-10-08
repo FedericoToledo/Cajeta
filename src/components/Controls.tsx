@@ -16,6 +16,9 @@ interface Props {
   mode: BoxMode;
   onMode: (m: BoxMode) => void;
   multiItem: boolean;
+  wantsInsert: boolean;
+  onWantsInsert: (v: boolean) => void;
+  showInsertToggle: boolean; // el flag por producto solo aplica en "Cajas individuales" (no la caja externa)
 }
 
 /** Slider + input numérico. */
@@ -58,6 +61,7 @@ const OFF_AXES: ("x" | "y" | "z")[] = ["x", "y", "z"];
 
 export default function Controls({
   params, product, onChange, orientation, onOrientation, onAutoOrient, offset, onOffset, mode, onMode, multiItem,
+  wantsInsert, onWantsInsert, showInsertToggle,
 }: Props) {
   const setUp = (up: UpAxis) => onOrientation({ ...orientation, up });
   const setType = (boxType: BoxType) => onChange({ ...params, boxType });
@@ -108,6 +112,13 @@ export default function Controls({
           onChange={(v) => onOffset({ ...offset, [ax]: v })} />
       ))}
       <button className="axis" onClick={() => onOffset({ x: 0, y: 0, z: 0 })}>Centrar</button>
+
+      {showInsertToggle && (
+        <label className="check">
+          <input type="checkbox" checked={wantsInsert} onChange={(e) => onWantsInsert(e.target.checked)} />
+          <span>Lleva soporte/insert (destildá para cajita simple, ej. cables)</span>
+        </label>
+      )}
 
       <h3>Insert de suspensión</h3>
       <label className="check">
