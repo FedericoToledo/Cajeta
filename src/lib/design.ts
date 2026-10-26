@@ -4,13 +4,13 @@
 // imágenes embebidas en base64 (grabado). Compatible con LightBurn y similares.
 import makerjs from "makerjs";
 import { Params, innerDims } from "./types";
-import { boxPieces, GAP } from "./assemble";
+import { boxPieces, columnOffsets, layoutColumn } from "./assemble";
 import { toSVG } from "./exporters";
 
 export type PieceKey = "bandeja" | "tapa";
 export type FaceKey = "top" | "front" | "back" | "left" | "right";
 
-/** Rectángulo de una cara en las MISMAS coordenadas (mm) que assembleBox(p). */
+/** Rectángulo de una cara en las coordenadas del plano de Diseño (columna vertical). */
 export interface FaceRect {
   id: string; // `${piece}:${face}`
   piece: PieceKey;
@@ -42,46 +42,72 @@ function localFaces(L: number, W: number, H: number): Omit<FaceRect, "id" | "pie
 }
 
 /**
- * Caras decorables en coordenadas de assembleBox(p). Replica el layout de
- * `assemble.ts` (zero() + cursor con GAP) para que los rectángulos coincidan
- * exactamente con el dieline exportado. Soporta bandeja+tapa y cofre.
+ * Caras decorables del plano de Diseño. Las piezas van en columna (bandeja arriba,
+ * tapa abajo). Si el conjunto queda más ancho que alto, se gira 90° para leerlo
+ * en vertical. El DXF del router sigue en fila; esto es solo la vista de Diseño.
  */
 export function faceRects(p: Params): FaceRect[] {
-  if (p.boxType === "chest") return chestFaceRects(p);
+  return designFrame(p).faces;
+}
+
+/** Plano de Diseño: mismo modelo que las caras, en vertical. */
+export function designFrame(p: Params): { model: makerjs.IModel; faces: FaceRect[] } {
+  const model = layoutColumn(boxPieces(p));
+  const faces = p.boxType === "chest" ? chestFaceRects(p) : trayFaceRects(p);
+  return turnUpright(model, faces);
+}
+
+function trayFaceRects(p: Params): FaceRect[] {
   const pieces = boxPieces(p); // [bandeja, tapa]
+  const offs = columnOffsets(pieces);
   const inner = innerDims(p);
   const grow = 2 * (p.thickness + p.lidClearance);
   const dims: Record<string, { L: number; W: number; H: number }> = {
     bandeja: { L: inner.L, W: inner.W, H: inner.H },
     tapa: { L: inner.L + grow, W: inner.W + grow, H: p.lidHeight },
   };
-
-  // layout() posiciona el bbox de cada pieza en (cursorX - low[0], -low[1]); las
-  // caras (en coords locales de la pieza) se trasladan por ese mismo offset.
   const out: FaceRect[] = [];
-  let cursorX = 0;
-  for (const piece of pieces) {
-    const e = makerjs.measure.modelExtents(piece.model);
-    const lo0 = e ? e.low[0] : 0, lo1 = e ? e.low[1] : 0;
+  pieces.forEach((piece, i) => {
     const d = dims[piece.key];
     const key = piece.key as PieceKey;
+    const off = offs[i];
     for (const f of localFaces(d.L, d.W, d.H)) {
-      // La cara "top" de la bandeja es el piso exterior (no visible): se omite.
       if (key === "bandeja" && f.face === "top") continue;
       out.push({
         id: `${key}:${f.face}`,
         piece: key,
         face: f.face,
         label: `${key === "tapa" ? "Tapa" : "Bandeja"} · ${FACE_LABEL[f.face]}`,
-        x: f.x + cursorX - lo0,
-        y: f.y - lo1,
+        x: f.x + off.ox,
+        y: f.y + off.oy,
         w: f.w,
         h: f.h,
       });
     }
-    cursorX += (e ? e.high[0] - e.low[0] : 0) + GAP;
-  }
+  });
   return out;
+}
+
+/** Si el plano es apaisado, lo gira 90° (el texto de las caras sigue horizontal). */
+function turnUpright(model: makerjs.IModel, faces: FaceRect[]): { model: makerjs.IModel; faces: FaceRect[] } {
+  const e = makerjs.measure.modelExtents(model);
+  if (!e) return { model, faces };
+  const w = e.high[0] - e.low[0], h = e.high[1] - e.low[1];
+  if (w <= h) return { model, faces };
+  makerjs.model.rotate(model, 90);
+  const er = makerjs.measure.modelExtents(model);
+  const dx = er ? -er.low[0] : 0, dy = er ? -er.low[1] : 0;
+  makerjs.model.moveRelative(model, [dx, dy]);
+  return { model, faces: faces.map((f) => rotateFace(f, dx, dy)) };
+}
+
+function rotateFace(f: FaceRect, dx: number, dy: number): FaceRect {
+  const corners: [number, number][] = [
+    [f.x, f.y], [f.x + f.w, f.y], [f.x + f.w, f.y + f.h], [f.x, f.y + f.h],
+  ].map(([x, y]) => [-y + dx, x + dy]);
+  const xs = corners.map((c) => c[0]), ys = corners.map((c) => c[1]);
+  const x = Math.min(...xs), y = Math.min(...ys);
+  return { ...f, x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y };
 }
 
 // --- Cofre (chest) ---

@@ -4,11 +4,10 @@
 // si el cartón tiene capa oscura), no la foto real. Exporta SVG para la grabadora.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Params } from "../lib/types";
-import { assembleBox } from "../lib/assemble";
 import { toSVG, download } from "../lib/exporters";
 import {
   DesignImage, Placement, FaceRect,
-  faceRects, designToSVG, defaultPlacement, modelBounds, placementSVGBox,
+  designFrame, designToSVG, defaultPlacement, modelBounds, placementSVGBox,
 } from "../lib/design";
 
 interface Props {
@@ -17,6 +16,7 @@ interface Props {
   placements: Placement[];
   onImages: (imgs: DesignImage[]) => void;
   onPlacements: (pls: Placement[]) => void;
+  toolsOn: boolean;
 }
 
 function readAsDataURL(file: File): Promise<string> {
@@ -56,9 +56,10 @@ type Gesture = {
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
-export default function DesignView({ p, images, placements, onImages, onPlacements }: Props) {
-  const faces: FaceRect[] = useMemo(() => faceRects(p), [p]);
-  const model = useMemo(() => assembleBox(p), [p]);
+export default function DesignView({ p, images, placements, onImages, onPlacements, toolsOn }: Props) {
+  const frame = useMemo(() => designFrame(p), [p]);
+  const faces: FaceRect[] = frame.faces;
+  const model = frame.model;
   const bounds = useMemo(() => modelBounds(model), [model]);
   const imgMap = useMemo(() => Object.fromEntries(images.map((i) => [i.id, i])), [images]);
   const bg = useMemo(() => toSVG(model, { stroke: "2.2", responsive: true }), [model]);
@@ -262,7 +263,7 @@ export default function DesignView({ p, images, placements, onImages, onPlacemen
   const SW = 1.6 / unitPx;
 
   return (
-    <div className="design">
+    <div className={`design${toolsOn ? " tools-on" : ""}`}>
       <div className="design-stage" ref={stageRef}>
         <div
           className={`design-canvas${dragOver ? " over" : ""}`}

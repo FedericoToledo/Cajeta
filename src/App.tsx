@@ -1,4 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+
+function useNarrow() {
+  const [narrow, setNarrow] = useState(() => window.matchMedia("(max-width: 860px)").matches);
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 860px)");
+    const on = () => setNarrow(mq.matches);
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
+  return narrow;
+}
 import Viewer3D from "./components/Viewer3D";
 import FoldSim from "./components/FoldSim";
 import Controls from "./components/Controls";
@@ -38,6 +49,11 @@ export default function App() {
   const [view, setView] = useState<"product" | "fold" | "design">("product");
   const [images, setImages] = useState<DesignImage[]>([]);
   const [placements, setPlacements] = useState<Placement[]>([]);
+  const [toolsOn, setToolsOn] = useState(false);
+  const [foldPiece, setFoldPiece] = useState("caja");
+  const [foldFace, setFoldFace] = useState<"3d" | "cut">("3d");
+  const narrow = useNarrow();
+  const openView = (next: "product" | "fold" | "design") => { setView(next); setToolsOn(false); };
 
   const onFiles = async (files: FileList) => {
     setError(null);
@@ -268,24 +284,64 @@ export default function App() {
 
   const hasItems = items.length > 0 && !!boxParams;
 
+  const pieces = useMemo(() => {
+    if (effMode === "individual-boxes") {
+      return deliverables.map((d) => {
+        const nested = /^caja(\d+)$/.exec(d.id);
+        const index = nested ? Number(nested[1]) : undefined;
+        let label = d.id === "externa" ? "Caja grande" : d.title;
+        if (index !== undefined) {
+          const raw = (items[index]?.name ?? `Caja ${index + 1}`).replace(/\.stl$/i, "");
+          label = raw.length > 16 ? `${raw.slice(0, 14)}…` : raw;
+        }
+        const kind: "box" | "nested" = index === undefined ? "box" : "nested";
+        return { id: d.id, label, kind, index, deliverableId: d.id };
+      });
+    }
+    return [
+      { id: "caja", label: "Caja", kind: "box" as const, index: undefined, deliverableId: "caja" },
+      { id: "insert", label: "Insert", kind: "insert" as const, index: undefined, deliverableId: "insert" },
+    ];
+  }, [effMode, deliverables, items]);
+  const activePiece = pieces.find((p) => p.id === foldPiece) ?? pieces[0];
+  const shownDeliverables = narrow && activePiece
+    ? deliverables.filter((d) => d.id === activePiece.deliverableId)
+    : deliverables;
+  const foldFocus = !narrow || !activePiece ? "all" as const : activePiece.kind;
+  const panelOn = toolsOn && view !== "design";
+  const toolSection = view !== "fold"
+    ? "product" as const
+    : !narrow
+      ? "both" as const
+      : activePiece?.kind === "insert"
+        ? "insert" as const
+        : "box" as const;
+
   return (
-    <div className="app">
+    <div className={hasItems ? "app ready" : "app"}>
       <header>
         <div className="brand">
           <h1>VexionBox</h1>
-          <p>1 · Organizá los productos → 2 · Plegado y cortes (DXF/PDF) → 3 · Diseño para láser</p>
+          <p>1 · Producto → 2 · Caja → 3 · Diseño</p>
         </div>
         <div className="legal">
-          <em>
+          <em className="legal-full">
             Todos los derechos reservados por{" "}
             <a href="https://vexion.ar" target="_blank" rel="noopener noreferrer">Vexion.ar</a>.
             <br />Herramienta de uso gratuito.
           </em>
+          <a className="legal-short" href="https://vexion.ar" target="_blank" rel="noopener noreferrer">Vexion.ar</a>
         </div>
       </header>
 
-      <div className="layout">
+      <div className={`layout${hasItems ? " has-items" : ""}${panelOn ? " tools-on" : ""}${view === "design" ? " view-design" : ""}`}>
+        {narrow && panelOn && (
+          <button type="button" className="sheet-backdrop" aria-label="Cerrar ajustes" onClick={() => setToolsOn(false)} />
+        )}
         <aside className="panel">
+          <button type="button" className="sheet-close" onClick={() => setToolsOn(false)}>Cerrar</button>
+          {(view === "product" || !hasItems) && (
+          <>
           <label className="upload">
             <input
               type="file" accept=".stl" multiple
@@ -313,8 +369,10 @@ export default function App() {
               ))}
             </div>
           )}
+          </>
+          )}
 
-          {hasItems && boxParams && selItem && selProduct && (
+          {hasItems && boxParams && selItem && selProduct && view !== "design" && (
             <Controls
               params={boxParams}
               product={selProduct}
@@ -330,22 +388,32 @@ export default function App() {
               wantsInsert={selItem.wantsInsert}
               onWantsInsert={(v) => setItemWantsInsert(selItem.id, v)}
               showInsertToggle={items.length > 1 && mode === "individual-boxes" && (selIdx >= 0 ? selIdx : 0) !== outerIdx}
+              compact={narrow}
+              section={toolSection}
             />
           )}
 
+          {view === "fold" && (
           <div className="legend">
             <span className="cut">— Corte</span>
             <span className="crease">— Pliegue</span>
             <span className="glue">● Pegado/broche</span>
           </div>
+          )}
         </aside>
 
         <main className="stage">
           <div className="tabs">
-            <button className={view === "product" ? "tab on" : "tab"} onClick={() => setView("product")}>1 · Organizar productos 3D</button>
-            <button className={view === "fold" ? "tab on" : "tab"} onClick={() => setView("fold")}>2 · Plegado y cortes 3D</button>
-            <button className={view === "design" ? "tab on" : "tab"} onClick={() => setView("design")}>3 · Diseño</button>
+            <button className={view === "product" ? "tab on" : "tab"} onClick={() => openView("product")}>1 · Producto</button>
+            <button className={view === "fold" ? "tab on" : "tab"} onClick={() => openView("fold")}>2 · Caja</button>
+            <button className={view === "design" ? "tab on" : "tab"} onClick={() => openView("design")}>3 · Diseño</button>
           </div>
+
+          {narrow && hasItems && view !== "fold" && (
+            <button type="button" className={`ajustes-fab chip${toolsOn ? " on" : ""}`} onClick={() => setToolsOn((v) => !v)}>
+              {toolsOn ? "Cerrar" : "Ajustes"}
+            </button>
+          )}
 
           <ErrorBoundary label="la vista">
             {!hasItems ? (
@@ -356,12 +424,24 @@ export default function App() {
                   items={items.map((it) => ({ id: it.id, buffer: it.buffer, orientation: it.orientation }))}
                   positions={positions}
                 />
-                <p className="stage-hint">Acomodá los productos (orientación y desplazamiento). Los cortes se generan en el paso 2.</p>
+                <p className="stage-hint">Acomodá los productos. La caja se arma en el paso siguiente.</p>
               </div>
             ) : view === "fold" ? (
-              <div className="fold-and-cuts">
+              <div className={`fold-and-cuts${narrow ? ` face-${foldFace}` : ""}`}>
+                {narrow && activePiece && (
+                  <div className="tool-row">
+                    {pieces.map((p) => (
+                      <button type="button" key={p.id} className={activePiece.id === p.id ? "chip on" : "chip"} onClick={() => setFoldPiece(p.id)}>{p.label}</button>
+                    ))}
+                    <button type="button" className={foldFace === "3d" ? "chip on" : "chip"} onClick={() => setFoldFace("3d")}>Armado</button>
+                    <button type="button" className={foldFace === "cut" ? "chip on" : "chip"} onClick={() => setFoldFace("cut")}>Corte</button>
+                    <button type="button" className={toolsOn ? "chip on" : "chip"} onClick={() => setToolsOn((v) => !v)}>
+                      {toolsOn ? "Cerrar" : "Ajustes"}
+                    </button>
+                  </div>
+                )}
                 <div className="pane-3d">
-                  {designParams && (
+                  {designParams && (!narrow || foldFace === "3d") && (
                     <FoldSim
                       params={designParams}
                       mode={effMode}
@@ -372,14 +452,21 @@ export default function App() {
                       outerIdx={outerIdx}
                       placements={placements}
                       images={images}
+                      focus={foldFocus}
+                      nestedIndex={activePiece?.index}
                     />
                   )}
                 </div>
                 <section className="stage-2d">
-                  {deliverables.length === 0 ? (
+                  <p className="legend stage-legend">
+                    <span className="cut">— Corte</span>
+                    <span className="crease">— Pliegue</span>
+                    <span className="glue">● Pegado</span>
+                  </p>
+                  {(shownDeliverables.length === 0 ? deliverables : shownDeliverables).length === 0 ? (
                     <div className="empty">Los cortes aparecerán acá</div>
                   ) : (
-                    deliverables.map((d) => (
+                    (shownDeliverables.length === 0 ? deliverables : shownDeliverables).map((d) => (
                       <div key={d.id} className="deliverable">
                         <div className="dieline-head">
                           <h2>{d.title}</h2>
@@ -403,6 +490,7 @@ export default function App() {
                     placements={placements}
                     onImages={setImages}
                     onPlacements={setPlacements}
+                    toolsOn={toolsOn}
                   />
                 )}
               </div>
@@ -410,6 +498,12 @@ export default function App() {
           </ErrorBoundary>
         </main>
       </div>
+
+      <nav className="bottom-nav">
+        <button type="button" className={view === "product" ? "nav-btn on" : "nav-btn"} onClick={() => openView("product")}>Producto</button>
+        <button type="button" className={view === "fold" ? "nav-btn on" : "nav-btn"} onClick={() => openView("fold")}>Caja</button>
+        <button type="button" className={view === "design" ? "nav-btn on" : "nav-btn"} onClick={() => openView("design")}>Diseño</button>
+      </nav>
     </div>
   );
 }

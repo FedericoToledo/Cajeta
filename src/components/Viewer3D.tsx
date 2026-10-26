@@ -40,6 +40,8 @@ export default function Viewer3D({ items, positions }: Props) {
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
   const gridRef = useRef<THREE.GridHelper | null>(null);
+  const frameRef = useRef<() => boolean>(() => false);
+  const needsFrame = useRef(false);
 
   // Inicializa la escena una sola vez.
   useEffect(() => {
@@ -74,14 +76,19 @@ export default function Viewer3D({ items, positions }: Props) {
     animate();
 
     const onResize = () => {
+      if (!mount.clientWidth || !mount.clientHeight) return;
       camera.aspect = mount.clientWidth / mount.clientHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(mount.clientWidth, mount.clientHeight);
+      frameRef.current();
     };
     window.addEventListener("resize", onResize);
+    const ro = new ResizeObserver(onResize);
+    ro.observe(mount);
 
     return () => {
       cancelAnimationFrame(raf);
+      ro.disconnect();
       window.removeEventListener("resize", onResize);
       controls.dispose();
       renderer.dispose();
@@ -117,22 +124,34 @@ export default function Viewer3D({ items, positions }: Props) {
     });
     scene.add(group);
     groupRef.current = group;
-    group.updateMatrixWorld(true);
-    const bb = new THREE.Box3().setFromObject(group);
-    // El piso se apoya debajo del objeto más bajo.
-    if (gridRef.current && !bb.isEmpty()) gridRef.current.position.y = bb.min.y;
-    // Encuadre automático (zoom out) para que entre todo.
-    const cam = cameraRef.current, ctr = controlsRef.current;
-    if (cam && ctr && !bb.isEmpty()) {
-      const center = bb.getCenter(new THREE.Vector3());
-      const size = bb.getSize(new THREE.Vector3());
-      const maxDim = Math.max(size.x, size.y, size.z) || 1;
-      const dist = (maxDim / (2 * Math.tan((cam.fov * Math.PI) / 360))) * 1.5;
+    needsFrame.current = true;
+    // Encuadre holgado: la esfera de la pieza ocupa menos de la mitad del visor.
+    const tryFrame = () => {
+      if (!needsFrame.current) return false;
+      const cam = cameraRef.current, ctr = controlsRef.current, mount = mountRef.current;
+      if (!cam || !ctr || !mount || !mount.clientWidth || !mount.clientHeight) return false;
+      group.updateMatrixWorld(true);
+      const bb = new THREE.Box3().setFromObject(group);
+      if (bb.isEmpty()) return false;
+      if (gridRef.current) gridRef.current.position.y = bb.min.y;
+      const sphere = bb.getBoundingSphere(new THREE.Sphere());
+      const aspect = mount.clientWidth / mount.clientHeight;
+      cam.aspect = aspect;
+      const halfTan = Math.tan((cam.fov * Math.PI) / 180 / 2);
+      const dist = Math.max(sphere.radius / halfTan, sphere.radius / (halfTan * aspect), 1) * 2.15;
       const d = new THREE.Vector3(1, 0.8, 1).normalize();
-      cam.position.copy(center).addScaledVector(d, dist);
-      cam.near = Math.max(0.5, dist / 200); cam.far = dist * 200; cam.updateProjectionMatrix();
-      ctr.target.copy(center); ctr.update();
-    }
+      cam.position.copy(sphere.center).addScaledVector(d, dist);
+      cam.near = Math.max(0.5, dist / 200);
+      cam.far = Math.max(dist * 200, 100000);
+      cam.updateProjectionMatrix();
+      ctr.target.copy(sphere.center);
+      ctr.update();
+      needsFrame.current = false;
+      return true;
+    };
+    frameRef.current = tryFrame;
+    tryFrame();
+    return () => { frameRef.current = () => false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sig]);
 

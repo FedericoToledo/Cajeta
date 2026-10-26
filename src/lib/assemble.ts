@@ -41,6 +41,33 @@ function layout(pieces: Placed[]): makerjs.IModel {
   return { models };
 }
 
+/** Desplazamientos para apilar piezas de arriba hacia abajo. La primera queda arriba. */
+export function columnOffsets(pieces: Placed[]): { ox: number; oy: number }[] {
+  const measured = pieces.map((piece) => {
+    const e = makerjs.measure.modelExtents(piece.model);
+    const lo0 = e ? e.low[0] : 0, lo1 = e ? e.low[1] : 0;
+    const h = e ? e.high[1] - lo1 : 0;
+    return { lo0, lo1, h };
+  });
+  let top = measured.reduce((s, m) => s + m.h, 0) + GAP * Math.max(0, measured.length - 1);
+  return measured.map((m) => {
+    top -= m.h;
+    const off = { ox: -m.lo0, oy: top - m.lo1 };
+    top -= GAP;
+    return off;
+  });
+}
+
+/** Igual que layout, pero en columna: se lee de arriba hacia abajo. */
+export function layoutColumn(pieces: Placed[]): makerjs.IModel {
+  const offs = columnOffsets(pieces);
+  const models: Record<string, makerjs.IModel> = {};
+  pieces.forEach((piece, i) => {
+    models[piece.key] = makerjs.model.move(makerjs.cloneObject(piece.model), [offs[i].ox, offs[i].oy]);
+  });
+  return { models };
+}
+
 /** Piezas de la CAJA (bandeja + tapa, o cofre) — DXF/SVG separado. */
 export function assembleBox(p: Params): makerjs.IModel {
   return layout(boxPieces(p));

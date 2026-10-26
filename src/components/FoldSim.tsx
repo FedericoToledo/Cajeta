@@ -24,6 +24,9 @@ interface Props {
   outerIdx?: number; // índice del producto grande (caja externa) en Modo B
   placements?: Placement[];
   images?: DesignImage[];
+  /** En el teléfono se muestra un solo armado. En escritorio, todos. */
+  focus?: "all" | "box" | "insert" | "nested";
+  nestedIndex?: number;
 }
 
 /** Contexto de decoración para pintar imágenes sobre las caras de la caja. */
@@ -453,6 +456,8 @@ function FoldViewer({ title, build, signature }: { title: string; build: () => B
   const applyRef = useRef<FoldFn>(() => {});
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
+  const frameRef = useRef<() => boolean>(() => false);
+  const needsFrame = useRef(false);
   const [fold, setFold] = useState(1);
   const [playing, setPlaying] = useState(false);
 
@@ -478,13 +483,16 @@ function FoldViewer({ title, build, signature }: { title: string; build: () => B
     const animate = () => { raf = requestAnimationFrame(animate); controls.update(); renderer.render(scene, camera); };
     animate();
     const onResize = () => {
-      if (!mount.clientWidth) return;
+      if (!mount.clientWidth || !mount.clientHeight) return;
       camera.aspect = mount.clientWidth / mount.clientHeight; camera.updateProjectionMatrix();
       renderer.setSize(mount.clientWidth, mount.clientHeight);
+      frameRef.current();
     };
     window.addEventListener("resize", onResize);
+    const ro = new ResizeObserver(onResize);
+    ro.observe(mount);
     return () => {
-      cancelAnimationFrame(raf); window.removeEventListener("resize", onResize);
+      cancelAnimationFrame(raf); ro.disconnect(); window.removeEventListener("resize", onResize);
       controls.dispose(); renderer.dispose(); mount.removeChild(renderer.domElement);
     };
   }, []);
@@ -499,27 +507,39 @@ function FoldViewer({ title, build, signature }: { title: string; build: () => B
       scene.add(built.root);
       applyRef.current = built.setFold;
       applyRef.current(fold);
-      // Encuadre automático (zoom out) para que entre toda la pieza.
-      const cam = cameraRef.current, ctr = controlsRef.current;
-      if (cam && ctr) {
-        built.root.updateMatrixWorld(true);
-        const bb = new THREE.Box3().setFromObject(built.root);
-        if (!bb.isEmpty()) {
-          const center = bb.getCenter(new THREE.Vector3());
-          const size = bb.getSize(new THREE.Vector3());
-          const maxDim = Math.max(size.x, size.y, size.z) || 1;
-          const dist = (maxDim / (2 * Math.tan((cam.fov * Math.PI) / 360))) * 1.5;
-          const d = new THREE.Vector3(0.9, 0.7, 1.2).normalize();
-          cam.position.copy(center).addScaledVector(d, dist);
-          cam.near = Math.max(0.5, dist / 200); cam.far = dist * 200; cam.updateProjectionMatrix();
-          ctr.target.copy(center); ctr.update();
-        }
-      }
+      needsFrame.current = true;
+      // Mismo margen que el producto: la animación arranca holgada, no pegada a la cámara.
+      const tryFrame = () => {
+        if (!needsFrame.current) return false;
+        const cam = cameraRef.current, ctr = controlsRef.current, mount = mountRef.current, root = rootRef.current;
+        if (!cam || !ctr || !mount || !root || !mount.clientWidth || !mount.clientHeight) return false;
+        applyRef.current(fold);
+        root.updateMatrixWorld(true);
+        const bb = new THREE.Box3().setFromObject(root);
+        if (bb.isEmpty()) return false;
+        const sphere = bb.getBoundingSphere(new THREE.Sphere());
+        const aspect = mount.clientWidth / mount.clientHeight;
+        cam.aspect = aspect;
+        const halfTan = Math.tan((cam.fov * Math.PI) / 180 / 2);
+        const dist = Math.max(sphere.radius / halfTan, sphere.radius / (halfTan * aspect), 1) * 2.15;
+        const d = new THREE.Vector3(0.9, 0.7, 1.2).normalize();
+        cam.position.copy(sphere.center).addScaledVector(d, dist);
+        cam.near = Math.max(0.5, dist / 200);
+        cam.far = Math.max(dist * 200, 100000);
+        cam.updateProjectionMatrix();
+        ctr.target.copy(sphere.center);
+        ctr.update();
+        needsFrame.current = false;
+        return true;
+      };
+      frameRef.current = tryFrame;
+      tryFrame();
     } catch (e) {
       // Una geometría inválida no debe tumbar la app: log y escena vacía.
       console.error("Error al generar el plegado 3D:", e);
       rootRef.current = null;
       applyRef.current = () => {};
+      frameRef.current = () => false;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [signature]);
@@ -553,7 +573,7 @@ function FoldViewer({ title, build, signature }: { title: string; build: () => B
   );
 }
 
-export default function FoldSim({ params, mode, items, products, positions, nestedVolumes = [], outerIdx = 0, placements = [], images = [] }: Props) {
+export default function FoldSim({ params, mode, items, products, positions, nestedVolumes = [], outerIdx = 0, placements = [], images = [], focus = "all", nestedIndex }: Props) {
   // Precarga las imágenes subidas a <img> para poder usarlas como textura.
   const [loaded, setLoaded] = useState<Record<string, HTMLImageElement>>({});
   useEffect(() => {
@@ -594,35 +614,41 @@ export default function FoldSim({ params, mode, items, products, positions, nest
   return (
     <div className="foldgrid">
       <div className="fold-actions">
-        <button onClick={() => setNonce((n) => n + 1)}>🔄 Actualizar plegado</button>
-        <span className="meta">Se genera con la disposición actual; actualizá tras acomodar los productos.</span>
+        <button onClick={() => setNonce((n) => n + 1)}>Actualizar</button>
+        <span className="meta">Usa la posición actual de los productos.</span>
       </div>
       {mode === "individual-boxes" ? (
         <>
-          {/* Caja externa: el producto grande suspendido + las cajas chicas como volúmenes. */}
-          <FoldViewer title="Caja externa (contiene todo)" signature={`outer|${nonce}`}
-            build={() => {
-              const built = buildBox(params, "single-insert", items[outerIdx] ? [items[outerIdx]] : [], products[outerIdx] ? [products[outerIdx]] : [], [positions[outerIdx] ?? { x: 0, y: 0, z: 0 }], decor);
-              nestedVolumes.forEach((v) => {
-                const g = new THREE.BoxGeometry(v.w, params.trayWallHeight, v.h);
-                const box = new THREE.Mesh(g, mat(0.32, 0xd59248));
-                box.position.set(v.relX, params.trayWallHeight / 2, v.relY);
-                built.root.add(box);
-              });
-              return built;
-            }} />
-          {/* Cada caja chica: su propio armado. */}
+          {(focus === "all" || focus === "box") && (
+            <FoldViewer title="Caja grande" signature={`outer|${nonce}`}
+              build={() => {
+                const built = buildBox(params, "single-insert", items[outerIdx] ? [items[outerIdx]] : [], products[outerIdx] ? [products[outerIdx]] : [], [positions[outerIdx] ?? { x: 0, y: 0, z: 0 }], decor);
+                nestedVolumes.forEach((v) => {
+                  const g = new THREE.BoxGeometry(v.w, params.trayWallHeight, v.h);
+                  const box = new THREE.Mesh(g, mat(0.32, 0xd59248));
+                  box.position.set(v.relX, params.trayWallHeight / 2, v.relY);
+                  built.root.add(box);
+                });
+                return built;
+              }} />
+          )}
           {items.map((it, i) => (i === outerIdx ? null : (
-            <FoldViewer key={it.id} title={`Caja ${i + 1} — armado`} signature={`box${i}|${nonce}`}
-              build={() => buildBox({ ...params, product: products[i] }, "single-insert", [it], [products[i]], [{ x: 0, y: 0, z: 0 }])} />
+            (focus === "all" || (focus === "nested" && nestedIndex === i)) && (
+              <FoldViewer key={it.id} title="Caja" signature={`box${i}|${nonce}`}
+                build={() => buildBox({ ...params, product: products[i] }, "single-insert", [it], [products[i]], [{ x: 0, y: 0, z: 0 }])} />
+            )
           )))}
         </>
       ) : (
         <>
-          <FoldViewer title="Caja" signature={`box|${nonce}`}
-            build={() => buildBox(params, mode, items, products, positions, decor)} />
-          <FoldViewer title="Insert" signature={`ins|${nonce}`}
-            build={() => buildInsertMulti(params, items, products, positions)} />
+          {(focus === "all" || focus === "box") && (
+            <FoldViewer title="Caja" signature={`box|${nonce}`}
+              build={() => buildBox(params, mode, items, products, positions, decor)} />
+          )}
+          {(focus === "all" || focus === "insert") && (
+            <FoldViewer title="Insert" signature={`ins|${nonce}`}
+              build={() => buildInsertMulti(params, items, products, positions)} />
+          )}
         </>
       )}
     </div>
